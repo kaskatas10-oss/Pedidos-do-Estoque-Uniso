@@ -22,21 +22,24 @@
  * ===========================================================================
  */
 
-import { db, auth, signInAnonymously, onAuthStateChanged } from './firebase-config.js';
-import {
-  collection,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  serverTimestamp,
-  query,
-  orderBy
-} from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
+/**
+ * IMPORTANTE: o Firebase (firebase-config.js e o SDK do Firestore, carregado
+ * do CDN gstatic.com) é importado de forma DINÂMICA dentro de
+ * carregarFirebaseEIniciar() (seção 5), em vez de um "import" estático no
+ * topo do arquivo. Isso é proposital: um "import" estático que falha (rede
+ * bloqueada, firewall corporativo, extensão de bloqueio de anúncios, erro
+ * nas credenciais) impede a execução de TODO o resto do app.js - inclusive
+ * funções que não têm nada a ver com o Firebase, como o dark mode, o modo
+ * celular e a validação dos formulários. Com o import dinâmico, uma falha
+ * ali é capturada e tratada (mostra o indicador vermelho no cabeçalho e uma
+ * mensagem de erro), enquanto o restante da interface continua funcionando
+ * normalmente.
+ */
+let db, auth, signInAnonymously, onAuthStateChanged;
+let collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, serverTimestamp, query, orderBy;
+let colecaoPedidos;
 
 const NOME_COLECAO = 'pedidos';
-const colecaoPedidos = collection(db, NOME_COLECAO);
 
 /* =========================================================================
    1. CONFIGURAÇÃO CENTRALIZADA DAS FAIXAS DE SLA
@@ -263,6 +266,52 @@ function textoSituacao(pedido, classificacao) {
    Usa autenticação anônima apenas para autorizar o acesso ao Firestore
    (não existe tela de login nem identificação de usuário no app).
    ========================================================================= */
+
+// Carrega o Firebase (config + SDKs de Authentication e Firestore) usando
+// import() DINÂMICO, e só então inicia a autenticação anônima e a escuta em
+// tempo real. Qualquer falha nesta função - rede bloqueada, firewall
+// corporativo, CDN inacessível, config inválida - é capturada aqui e não
+// afeta o resto da interface (dark mode, modo celular, formulário), que já
+// foi inicializada antes desta função ser chamada (ver seção 12).
+async function carregarFirebaseEIniciar() {
+  atualizarIndicadorSincronizacao('conectando');
+
+  try {
+    const [configModule, appModule, authModule, firestoreModule] = await Promise.all([
+      import('./firebase-config.js'),
+      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js'),
+      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js'),
+      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js')
+    ]);
+
+    db = configModule.db;
+    auth = configModule.auth;
+    signInAnonymously = authModule.signInAnonymously;
+    onAuthStateChanged = authModule.onAuthStateChanged;
+
+    collection = firestoreModule.collection;
+    addDoc = firestoreModule.addDoc;
+    updateDoc = firestoreModule.updateDoc;
+    deleteDoc = firestoreModule.deleteDoc;
+    doc = firestoreModule.doc;
+    onSnapshot = firestoreModule.onSnapshot;
+    serverTimestamp = firestoreModule.serverTimestamp;
+    query = firestoreModule.query;
+    orderBy = firestoreModule.orderBy;
+
+    colecaoPedidos = collection(db, NOME_COLECAO);
+
+    iniciarAutenticacaoEDados();
+  } catch (erro) {
+    const mensagem =
+      'Não foi possível carregar o Firebase. Verifique sua conexão de rede (o site precisa ' +
+      'acessar www.gstatic.com e googleapis.com - firewalls corporativos, bloqueadores de ' +
+      'anúncios ou redes restritas podem impedir isso) e se o arquivo firebase-config.js foi ' +
+      'enviado ao repositório. Detalhe: ' + erro.message;
+    exibirStatusConexao(mensagem, true);
+    atualizarIndicadorSincronizacao('erro', 'Não foi possível carregar o Firebase');
+  }
+}
 
 function iniciarAutenticacaoEDados() {
   onAuthStateChanged(auth, (usuario) => {
@@ -847,7 +896,56 @@ function renderizarFaixaAeroporto(lista) {
       partes.push(`${quantidade} VENCE${quantidade !== 1 ? 'M' : ''} EM ${dias} DIA${dias > 1 ? 'S' : ''}`);
     });
 
-  document.getElementById('conteudoFaixaAeroporto').textContent = partes.join('   |   ');
+  const texto = partes.join('   |   ');
+
+  montarTrilhoFaixaAeroporto(texto);
+
+  // Cor geral do rodapé: marrom enquanto houver pedidos em aberto (fila com
+  // trabalho pendente), verde quando não houver nenhum pedido em aberto.
+  const rodape = document.getElementById('faixaAeroporto');
+  if (rodape) {
+    rodape.classList.remove('marrom', 'verde');
+    rodape.classList.add(abertos.length > 0 ? 'marrom' : 'verde');
+  }
+}
+
+// Preenche a faixa de rolagem com repetições do texto - o suficiente para
+// que UM conjunto completo já cubra a largura da tela - e então duplica esse
+// conjunto inteiro (para a animação de -50% ficar perfeitamente contínua,
+// sem salto). Isso evita o problema de o texto ficar "preso" numa faixa
+// estreita do lado esquerdo quando há poucos indicadores (texto curto).
+// A velocidade é fixada em pixels por segundo, então a rolagem sempre
+// parece igualmente rápida, independentemente do tamanho do texto.
+const LARGURA_ESTIMADA_POR_CARACTERE_PX = 8.2; // fonte monoespaçada, ~0.85rem
+const ESPACAMENTO_LATERAL_BLOCO_PX = 80; // deve acompanhar o padding definido em .faixa-aeroporto-conteudo no styles.css
+const VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO = 80;
+
+function montarTrilhoFaixaAeroporto(texto) {
+  const trilho = document.getElementById('trilhoFaixaAeroporto');
+  if (!trilho) return;
+
+  const larguraJanela = window.innerWidth || document.documentElement.clientWidth || 1200;
+  const larguraBloco = (texto.length * LARGURA_ESTIMADA_POR_CARACTERE_PX) + ESPACAMENTO_LATERAL_BLOCO_PX;
+  const repeticoesPorConjunto = Math.max(1, Math.ceil(larguraJanela / larguraBloco) + 1);
+
+  trilho.innerHTML = '';
+  let indiceGlobal = 0;
+  for (let copia = 0; copia < 2; copia++) {
+    for (let i = 0; i < repeticoesPorConjunto; i++) {
+      const bloco = document.createElement('div');
+      bloco.className = 'faixa-aeroporto-conteudo';
+      bloco.textContent = texto;
+      // Apenas o primeiro bloco é lido por leitores de tela; as repetições
+      // seguintes existem só para preencher visualmente a rolagem.
+      if (indiceGlobal > 0) bloco.setAttribute('aria-hidden', 'true');
+      trilho.appendChild(bloco);
+      indiceGlobal++;
+    }
+  }
+
+  const larguraConjuntoEstimada = larguraBloco * repeticoesPorConjunto;
+  const duracaoSegundos = Math.max(8, larguraConjuntoEstimada / VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO);
+  trilho.style.setProperty('--duracao-faixa-aeroporto', `${duracaoSegundos}s`);
 }
 
 /* =========================================================================
@@ -1235,6 +1333,14 @@ window.carregarPedidosDemonstracao = carregarPedidosDemonstracao;
 
 /* =========================================================================
    12. INICIALIZAÇÃO DA APLICAÇÃO
+   -------------------------------------------------------------------------
+   A configuração de interface (tema, modo celular, formulário, filtros e a
+   primeira renderização) é executada de forma incondicional e SÍNCRONA,
+   antes de qualquer tentativa de carregar o Firebase. Assim, mesmo que o
+   carregamento do Firebase falhe (rede bloqueada, firewall, config
+   inválida), o dark mode, o modo celular e a validação do formulário
+   continuam funcionando normalmente. O carregamento do Firebase é feito
+   por último, de forma assíncrona e isolada, em carregarFirebaseEIniciar().
    ========================================================================= */
 inicializarTema();
 inicializarModoVisualizacao();
@@ -1242,4 +1348,4 @@ configurarModais();
 configurarFormularioInlineNovoPedido();
 configurarFiltrosEBusca();
 renderizarTudo();
-iniciarAutenticacaoEDados();
+carregarFirebaseEIniciar();
