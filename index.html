@@ -178,12 +178,14 @@
 
 <!-- Faixa fixa estilo painel de aeroporto: o texto rola continuamente (efeito
      "letreiro") e a cor de fundo indica o status geral (marrom = há pedidos
-     em aberto, verde = nenhum pedido em aberto). O conteúdo é duplicado para
-     permitir a rolagem contínua sem "salto" visual entre um ciclo e outro. -->
+     em aberto, verde = nenhum pedido em aberto). O JavaScript (função
+     renderizarFaixaAeroporto) preenche #trilhoFaixaAeroporto com repetições
+     do texto - o suficiente para cobrir a largura da tela mesmo quando há
+     poucos indicadores - e depois duplica esse conjunto inteiro, para a
+     rolagem ficar contínua e sem "salto" visual entre um ciclo e outro. -->
 <footer id="faixaAeroporto" class="faixa-aeroporto" aria-live="polite">
   <div class="faixa-aeroporto-trilho" id="trilhoFaixaAeroporto">
-    <div class="faixa-aeroporto-conteudo" id="conteudoFaixaAeroporto">Carregando indicadores...</div>
-    <div class="faixa-aeroporto-conteudo" id="conteudoFaixaAeroportoDuplicado" aria-hidden="true">Carregando indicadores...</div>
+    <div class="faixa-aeroporto-conteudo">Carregando indicadores...</div>
   </div>
 </footer>
 
