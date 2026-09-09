@@ -12,6 +12,10 @@
   <div class="header-brand">
     <span class="brand-mark">UNISO</span>
     <h1>Controle de SLA de Pedidos</h1>
+    <span id="indicadorSincronizacao" class="indicador-sincronizacao conectando" title="Status da conexão com o banco de dados">
+      <span class="ponto"></span>
+      <span id="textoSincronizacao">Conectando...</span>
+    </span>
   </div>
   <div class="header-actions">
     <button id="btnModoCelular" class="btn btn-icon" type="button" aria-label="Alternar para modo celular" title="Alternar para modo celular">📱</button>
@@ -172,9 +176,15 @@
 
 </main>
 
-<!-- Faixa fixa estilo painel de aeroporto -->
+<!-- Faixa fixa estilo painel de aeroporto: o texto rola continuamente (efeito
+     "letreiro") e a cor de fundo indica o status geral (marrom = há pedidos
+     em aberto, verde = nenhum pedido em aberto). O conteúdo é duplicado para
+     permitir a rolagem contínua sem "salto" visual entre um ciclo e outro. -->
 <footer id="faixaAeroporto" class="faixa-aeroporto" aria-live="polite">
-  <div class="faixa-aeroporto-conteudo" id="conteudoFaixaAeroporto">Carregando indicadores...</div>
+  <div class="faixa-aeroporto-trilho" id="trilhoFaixaAeroporto">
+    <div class="faixa-aeroporto-conteudo" id="conteudoFaixaAeroporto">Carregando indicadores...</div>
+    <div class="faixa-aeroporto-conteudo" id="conteudoFaixaAeroportoDuplicado" aria-hidden="true">Carregando indicadores...</div>
+  </div>
 </footer>
 
 <!-- Modal: editar pedido (a criação de pedidos é feita pelo formulário inline acima) -->

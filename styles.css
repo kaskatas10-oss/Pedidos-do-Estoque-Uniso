@@ -143,6 +143,43 @@ input, select, textarea { font-family: inherit; font-size: 0.9rem; }
 .app-header h1 { font-size: 1.15rem; color: var(--cor-header-texto); }
 .header-actions { display: flex; gap: 8px; align-items: center; }
 
+/* Indicador de sincronização em tempo real com o Firestore */
+.indicador-sincronizacao {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+}
+.indicador-sincronizacao .ponto {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9aa5b1; /* cinza = conectando, estado inicial */
+  flex: 0 0 auto;
+}
+.indicador-sincronizacao.ok .ponto {
+  background: #34c759;
+  animation: pulso-sincronizacao 2s ease-in-out infinite;
+}
+.indicador-sincronizacao.erro .ponto { background: #ef5350; animation: none; }
+.indicador-sincronizacao.erro { color: #ffd7d5; background: rgba(239, 83, 80, 0.18); }
+
+@keyframes pulso-sincronizacao {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.5); }
+  50% { box-shadow: 0 0 0 4px rgba(52, 199, 89, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .indicador-sincronizacao.ok .ponto { animation: none; }
+}
+
+@media (max-width: 720px) {
+  .indicador-sincronizacao { font-size: 0.68rem; }
+}
+
 /* ---------------------------------------------------------------------
    4. Botões
    --------------------------------------------------------------------- */
@@ -491,15 +528,51 @@ tbody tr:last-child td { border-bottom: none; }
   left: 0; right: 0; bottom: 0;
   background: var(--cor-faixa-fundo);
   color: var(--cor-faixa-texto);
-  padding: 12px 20px;
+  padding: 12px 0;
   font-family: "Courier New", monospace;
   font-weight: 700;
   letter-spacing: 0.04em;
   font-size: 0.85rem;
-  overflow-x: auto;
+  overflow-x: hidden;
   white-space: nowrap;
   z-index: 30;
   border-top: 2px solid var(--cor-primaria);
+  transition: background-color 0.3s ease, border-top-color 0.3s ease, color 0.3s ease;
+}
+
+/* Status geral do rodapé: marrom enquanto houver pedidos em aberto,
+   verde quando não houver nenhum pedido em aberto (fila zerada). */
+.faixa-aeroporto.marrom {
+  background: #3a2a1c;
+  color: #f4e3cf;
+  border-top-color: #c9834a;
+}
+.faixa-aeroporto.verde {
+  background: #10331f;
+  color: #d8f5e3;
+  border-top-color: #3ddc84;
+}
+
+/* Trilho com o conteúdo duplicado lado a lado: a animação move o trilho até
+   -50% (exatamente a largura de UMA cópia do conteúdo), então o próximo
+   quadro já reinicia com a segunda cópia posicionada onde a primeira
+   começou, criando a rolagem contínua sem salto. */
+.faixa-aeroporto-trilho {
+  display: inline-flex;
+  align-items: center;
+  animation: rolarFaixaAeroporto linear infinite;
+  animation-duration: var(--duracao-faixa-aeroporto, 20s);
+}
+.faixa-aeroporto-conteudo {
+  padding: 0 40px;
+  flex: 0 0 auto;
+}
+@keyframes rolarFaixaAeroporto {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .faixa-aeroporto-trilho { animation: none; }
 }
 
 /* ---------------------------------------------------------------------
