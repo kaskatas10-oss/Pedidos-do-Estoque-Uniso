@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Controle de SLA de Pedidos | UNISO</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-brand">
+    <span class="brand-mark">UNISO</span>
+    <h1>Controle de SLA de Pedidos</h1>
+    <span id="indicadorSincronizacao" class="indicador-sincronizacao conectando" title="Status da conexão com o banco de dados">
+      <span class="ponto"></span>
+      <span id="textoSincronizacao">Conectando...</span>
+    </span>
+  </div>
+  <div class="header-actions">
+    <button id="btnPainelOperacional" class="btn btn-icon" type="button" aria-label="Painel Operacional (início)" title="Painel Operacional (início)" aria-pressed="true">🏠</button>
+    <button id="btnPainelConsolidado" class="btn btn-icon" type="button" aria-label="Abrir Painel Consolidado" title="Painel Consolidado (indicadores, pedidos e histórico)" aria-pressed="false">📊</button>
+    <button id="btnRegistroSeparacao" class="btn btn-icon" type="button" aria-label="Registro de Separação e Organização" title="Registro de Separação e Organização">⏱️</button>
+    <button id="btnPainelTempos" class="btn btn-icon" type="button" aria-label="Abrir Painel de Tempos" title="Painel de Tempos (separação e organização)" aria-pressed="false">⏳</button>
+    <button id="btnModoCelular" class="btn btn-icon" type="button" aria-label="Alternar para modo celular" title="Alternar para modo celular">📱</button>
+    <button id="btnDarkMode" class="btn btn-icon" type="button" aria-label="Alternar tema claro/escuro" title="Alternar tema">🌙</button>
+  </div>
+</header>
+
+<main class="app-main">
+
+  <!-- Tela 1: Painel Operacional (tela inicial) -->
+  <div id="telaOperacional" class="tela-app">
+
+    <!-- Painel consolidado por dias restantes -->
+    <section class="painel-consolidado" aria-label="Painel consolidado por prazo">
+      <h2>Painel Consolidado por Prazo</h2>
+      <p class="secao-descricao">Clique em um grupo para ver os pedidos correspondentes.</p>
+      <div id="gruposConsolidados" class="grupos-consolidados"></div>
+    </section>
+
+    <!-- Busca e filtros -->
+    <section class="toolbar" aria-label="Busca e filtros">
+      <input type="search" id="campoBusca" placeholder="Buscar por número do pedido ou cliente...">
+
+      <select id="filtroStatus" aria-label="Filtrar por status">
+        <option value="">Todos os status</option>
+        <option value="aberto">Aberto</option>
+        <option value="finalizado">Finalizado</option>
+      </select>
+
+      <div class="filtro-data">
+        <label for="filtroRecebimentoInicio">Recebimento de</label>
+        <input type="date" id="filtroRecebimentoInicio">
+        <label for="filtroRecebimentoFim">até</label>
+        <input type="date" id="filtroRecebimentoFim">
+      </div>
+
+      <div class="filtro-data">
+        <label for="filtroVencimentoInicio">Vencimento de</label>
+        <input type="date" id="filtroVencimentoInicio">
+        <label for="filtroVencimentoFim">até</label>
+        <input type="date" id="filtroVencimentoFim">
+      </div>
+
+      <button id="btnLimparFiltros" class="btn btn-secondary" type="button">Limpar filtros</button>
+    </section>
+
+    <!-- Adicionar novo pedido (campos sempre visíveis, sem modal) -->
+    <section class="form-inline-pedido" aria-label="Adicionar novo pedido">
+      <h2>Adicionar Novo Pedido</h2>
+      <form id="formNovoPedidoInline" class="form-inline-grid" novalidate>
+        <label>Nº Pedido
+          <input type="text" id="inlineNumeroPedido" required>
+        </label>
+        <label>Cliente
+          <input type="text" id="inlineCliente" required>
+        </label>
+        <label>Data do Pedido
+          <input type="date" id="inlineDataPedido" required>
+        </label>
+        <label>Rec. Estoque
+          <input type="date" id="inlineDataRecebimento" required>
+        </label>
+        <label>SLA (dias úteis)
+          <input type="number" id="inlineSlaDias" min="1" step="1" required>
+        </label>
+        <label class="campo-obs-inline">Observação
+          <input type="text" id="inlineObservacao" placeholder="opcional">
+        </label>
+        <button type="submit" class="btn btn-primary btn-adicionar-inline">+ Adicionar</button>
+      </form>
+      <p class="preview-vencimento">Vencimento calculado: <strong id="previewVencimentoInline">–</strong></p>
+      <p id="erroFormInline" class="mensagem-erro" hidden></p>
+    </section>
+
+  </div>
+
+  <!-- Tela 2: Painel Consolidado (indicadores, pedidos e histórico) -->
+  <div id="telaPainelConsolidado" class="tela-app" hidden>
+
+    <div class="tela-cabecalho">
+      <h2 class="tela-titulo">Painel Consolidado</h2>
+      <button type="button" id="btnVoltarOperacional" class="btn btn-secondary">← Voltar ao Painel Operacional</button>
+    </div>
+
+    <!-- Dashboard de indicadores -->
+    <section class="dashboard" aria-label="Indicadores gerais">
+      <div class="card card-neutro">
+        <span class="card-valor" id="indTotalAberto">0</span>
+        <span class="card-label">Pedidos em aberto</span>
+      </div>
+      <div class="card card-verde">
+        <span class="card-valor" id="indNoPrazo">0</span>
+        <span class="card-label">Dentro do prazo</span>
+      </div>
+      <div class="card card-vermelho">
+        <span class="card-valor" id="indVenceHoje">0</span>
+        <span class="card-label">Vencendo hoje</span>
+      </div>
+      <div class="card card-roxo">
+        <span class="card-valor" id="indAtrasados">0</span>
+        <span class="card-label">Atrasados</span>
+      </div>
+      <div class="card card-neutro">
+        <span class="card-valor" id="indFinalizadosHoje">0</span>
+        <span class="card-label">Finalizados hoje</span>
+      </div>
+      <div class="card card-neutro">
+        <span class="card-valor" id="indTaxaConclusao">0%</span>
+        <span class="card-label">Taxa de conclusão</span>
+      </div>
+    </section>
+
+    <!-- Busca e filtros (mesmo estado do Painel Operacional, sincronizados) -->
+    <section class="toolbar" aria-label="Busca e filtros">
+      <input type="search" id="campoBusca2" placeholder="Buscar por número do pedido ou cliente...">
+
+      <select id="filtroStatus2" aria-label="Filtrar por status">
+        <option value="">Todos os status</option>
+        <option value="aberto">Aberto</option>
+        <option value="finalizado">Finalizado</option>
+      </select>
+
+      <div class="filtro-data">
+        <label for="filtroRecebimentoInicio2">Recebimento de</label>
+        <input type="date" id="filtroRecebimentoInicio2">
+        <label for="filtroRecebimentoFim2">até</label>
+        <input type="date" id="filtroRecebimentoFim2">
+      </div>
+
+      <div class="filtro-data">
+        <label for="filtroVencimentoInicio2">Vencimento de</label>
+        <input type="date" id="filtroVencimentoInicio2">
+        <label for="filtroVencimentoFim2">até</label>
+        <input type="date" id="filtroVencimentoFim2">
+      </div>
+
+      <button id="btnLimparFiltros2" class="btn btn-secondary" type="button">Limpar filtros</button>
+    </section>
+
+    <!-- Lista de pedidos -->
+    <section class="lista-pedidos" aria-label="Lista de pedidos">
+      <h2>Pedidos <span id="contadorListaPedidos" class="contador"></span></h2>
+      <div class="tabela-wrapper" id="tabelaPedidosWrapper">
+        <table id="tabelaPedidos">
+          <colgroup>
+            <col style="width:6%">
+            <col style="width:13%">
+            <col style="width:7%">
+            <col style="width:7%">
+            <col style="width:5%">
+            <col style="width:7%">
+            <col style="width:12%">
+            <col style="width:9%">
+            <col style="width:8%">
+            <col style="width:8%">
+            <col style="width:9%">
+            <col style="width:9%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Nº Pedido</th>
+              <th>Cliente</th>
+              <th>Data Pedido</th>
+              <th>Recebimento</th>
+              <th>SLA (dias úteis)</th>
+              <th>Vencimento</th>
+              <th>Situação</th>
+              <th>Status</th>
+              <th>Operador</th>
+              <th>Observação</th>
+              <th>Organização</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="corpoTabelaPedidos"></tbody>
+        </table>
+      </div>
+      <div id="listaCardsPedidos" class="lista-cards-pedidos"></div>
+      <p id="mensagemListaVazia" class="mensagem-vazia" hidden>Nenhum pedido encontrado com os filtros atuais.</p>
+    </section>
+
+    <!-- Histórico operacional -->
+    <section class="historico" aria-label="Histórico operacional">
+      <div class="historico-header">
+        <h2>Histórico Operacional (últimos 14 dias)</h2>
+        <div class="historico-controles">
+          <label for="agrupamentoHistorico">Agrupar por</label>
+          <select id="agrupamentoHistorico">
+            <option value="recebimento">Data de recebimento</option>
+            <option value="vencimento">Data de vencimento</option>
+            <option value="finalizacao">Data de finalização</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="graficoHistoricoSvgContainer" class="grafico-svg-container" role="img" aria-label="Gráfico de barras empilhadas do histórico operacional"></div>
+
+      <div class="tabela-wrapper">
+        <table id="tabelaHistorico">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Recebidos</th>
+              <th>Finalizados</th>
+              <th>Pendentes</th>
+              <th>Atrasados</th>
+              <th>% Conclusão</th>
+            </tr>
+          </thead>
+          <tbody id="corpoTabelaHistorico"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Tela 3: Painel de Tempos (medição de separação e organização) -->
+  <div id="telaPainelTempos" class="tela-app" hidden>
+
+    <div class="tela-cabecalho">
+      <h2 class="tela-titulo">Painel de Tempos</h2>
+      <button type="button" id="btnVoltarOperacionalTempos" class="btn btn-secondary">← Voltar ao Painel Operacional</button>
+    </div>
+
+    <!-- Indicadores gerais -->
+    <section class="dashboard" aria-label="Indicadores gerais de tempo">
+      <div class="card card-neutro">
+        <span class="card-valor" id="tempoIndTotal">0</span>
+        <span class="card-label">Total</span>
+      </div>
+      <div class="card card-neutro">
+        <span class="card-valor" id="tempoIndPendentes">0</span>
+        <span class="card-label">Pendentes</span>
+      </div>
+      <div class="card card-verde">
+        <span class="card-valor" id="tempoIndConcluidas">0</span>
+        <span class="card-label">Concluídas</span>
+      </div>
+      <div class="card card-neutro">
+        <span class="card-valor" id="tempoIndDiasRegistrados">0</span>
+        <span class="card-label">Dias registrados</span>
+      </div>
+      <div class="card card-neutro">
+        <span class="card-valor" id="tempoIndTaxaConclusao">0%</span>
+        <span class="card-label">Taxa de conclusão</span>
+      </div>
+    </section>
+
+    <!-- Tempo médio por operador -->
+    <section aria-label="Tempo médio por operador">
+      <h2>Tempo Médio por Operador</h2>
+      <p class="secao-descricao">
+        Tempo médio de cada etapa (separação e organização), calculado a partir dos registros
+        de início e fim, atribuído a quem finalizou o registro. O percentual indica a
+        participação do operador no volume total de pedidos processados naquela etapa.
+      </p>
+      <div class="tempos-operadores">
+        <div class="tempos-operadores-grupo">
+          <h3>Separação</h3>
+          <ul id="listaTemposSeparacao" class="lista-tempos-operador"></ul>
+          <p class="mensagem-vazia" id="mensagemVaziaTemposSeparacao" hidden>Nenhum registro de separação concluído ainda.</p>
+        </div>
+        <div class="tempos-operadores-grupo">
+          <h3>Organização</h3>
+          <ul id="listaTemposOrganizacao" class="lista-tempos-operador"></ul>
+          <p class="mensagem-vazia" id="mensagemVaziaTemposOrganizacao" hidden>Nenhum registro de organização concluído ainda.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Histórico diário -->
+    <section aria-label="Histórico diário de tempos">
+      <h2>Histórico Diário (últimos 14 dias)</h2>
+      <p class="secao-descricao">Agrupado pela Data do Pedido.</p>
+      <div class="tabela-wrapper">
+        <table id="tabelaHistoricoTempos">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Total</th>
+              <th>Pendentes</th>
+              <th>Status</th>
+              <th>Concluídas</th>
+              <th>Tempo médio</th>
+              <th>% efetuado no dia</th>
+            </tr>
+          </thead>
+          <tbody id="corpoTabelaHistoricoTempos"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+</main>
+
+<!-- Faixa fixa estilo painel de aeroporto: o texto rola continuamente (efeito
+     "letreiro", uma única cópia por vez, entrando pela direita e saindo
+     pela esquerda) e a cor de fundo indica o status geral (azul = há
+     pedidos em aberto/pendências, verde = nenhum pedido em aberto). O
+     JavaScript (função montarTrilhoFaixaAeroporto, em app.js) calcula as
+     posições inicial/final e a duração a partir da largura real da tela e
+     do texto. -->
+<footer id="faixaAeroporto" class="faixa-aeroporto" aria-live="polite">
+  <div class="faixa-aeroporto-trilho" id="trilhoFaixaAeroporto">
+    <div class="faixa-aeroporto-conteudo">Carregando indicadores...</div>
+  </div>
+</footer>
+
+<!-- Modal: editar pedido (a criação de pedidos é feita pelo formulário inline acima) -->
+<div id="modalPedido" class="modal-overlay" hidden>
+  <div class="modal modal-largo" role="dialog" aria-modal="true" aria-labelledby="modalPedidoTitulo">
+    <div class="modal-header">
+      <h2 id="modalPedidoTitulo">Editar Pedido</h2>
+      <button id="btnFecharModalPedido" class="btn btn-icon" type="button" aria-label="Fechar">✕</button>
+    </div>
+    <form id="formPedido" class="modal-body" novalidate>
+      <input type="hidden" id="campoPedidoId">
+      <div class="form-grid">
+        <label>Número do Pedido*
+          <input type="text" id="campoNumeroPedido" required>
+        </label>
+        <label>Cliente*
+          <input type="text" id="campoCliente" required>
+        </label>
+        <label>Data do Pedido*
+          <input type="date" id="campoDataPedido" required>
+        </label>
+        <label>Data de Recebimento no Estoque*
+          <input type="date" id="campoDataRecebimento" required>
+        </label>
+        <label>Prazo SLA (dias úteis)*
+          <input type="number" id="campoSlaDias" min="1" step="1" required>
+        </label>
+        <label class="campo-largo">Observação
+          <textarea id="campoObservacao" rows="3"></textarea>
+        </label>
+      </div>
+      <p class="preview-vencimento">Data de vencimento calculada: <strong id="previewVencimento">–</strong></p>
+
+      <!-- Correção manual dos registros de Separação e Organização (nome do
+           operador e data/hora de início e fim), para o caso de alguém
+           errar ao registrar pelo painel "Registro de Separação e
+           Organização". Deixar um campo em branco remove aquele registro;
+           o Status (badge) e a finalização automática do pedido são
+           recalculados a partir do que for salvo aqui. -->
+      <section class="secao-registro-operacional" aria-label="Correção manual do registro de separação">
+        <h3>Separação (correção manual)</h3>
+        <p class="secao-descricao">
+          Datas e horas são interpretadas no horário de Brasília, independentemente do fuso do
+          computador de quem está editando.
+        </p>
+        <div class="form-grid">
+          <label>Operador (início)
+            <input type="text" id="campoEditarOperadorInicioSeparacao">
+          </label>
+          <label>Data/hora início
+            <input type="datetime-local" id="campoEditarDataHoraInicioSeparacao">
+          </label>
+          <label>Operador (fim)
+            <input type="text" id="campoEditarOperadorFimSeparacao">
+          </label>
+          <label>Data/hora fim
+            <input type="datetime-local" id="campoEditarDataHoraFimSeparacao">
+          </label>
+        </div>
+      </section>
+
+      <section class="secao-registro-operacional" aria-label="Correção manual do registro de organização">
+        <h3>Organização (correção manual)</h3>
+        <p class="secao-descricao">
+          Datas e horas são interpretadas no horário de Brasília, independentemente do fuso do
+          computador de quem está editando.
+        </p>
+        <div class="form-grid">
+          <label>Operador (início)
+            <input type="text" id="campoEditarOperadorInicioOrganizacao">
+          </label>
+          <label>Data/hora início
+            <input type="datetime-local" id="campoEditarDataHoraInicioOrganizacao">
+          </label>
+          <label>Operador (fim)
+            <input type="text" id="campoEditarOperadorFimOrganizacao">
+          </label>
+          <label>Data/hora fim
+            <input type="datetime-local" id="campoEditarDataHoraFimOrganizacao">
+          </label>
+        </div>
+      </section>
+
+      <p id="erroFormPedido" class="mensagem-erro" hidden></p>
+      <div class="modal-footer">
+        <button type="button" id="btnCancelarPedido" class="btn btn-secondary">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Salvar Pedido</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: registro de separação e organização (início/fim), feito pelos
+     operadores de cada etapa. A organização só pode ser iniciada depois que
+     a separação do mesmo pedido estiver finalizada; ao finalizar a
+     organização, se a separação já estiver concluída, o pedido é
+     finalizado automaticamente. -->
+<div id="modalSeparacao" class="modal-overlay" hidden>
+  <div class="modal modal-largo" role="dialog" aria-modal="true" aria-labelledby="modalSeparacaoTitulo">
+    <div class="modal-header">
+      <h2 id="modalSeparacaoTitulo">Registro de Separação e Organização</h2>
+      <button id="btnFecharModalSeparacao" class="btn btn-icon" type="button" aria-label="Fechar">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <section class="secao-registro-operacional" aria-label="Registro de separação">
+        <h3>1. Separação</h3>
+        <p class="secao-descricao">
+          Informe o número do pedido e o seu nome, depois escolha "Iniciar Separação" (quando
+          começar a separar o pedido) ou "Finalizar Separação" (quando terminar). A data e a
+          hora são registradas automaticamente (horário de Brasília).
+        </p>
+        <form id="formRegistroSeparacao" novalidate>
+          <div class="form-grid">
+            <label>Nº do Pedido*
+              <input type="text" id="campoSeparacaoNumeroPedido" required>
+            </label>
+            <label>Seu nome*
+              <input type="text" id="campoSeparacaoOperador" required>
+            </label>
+          </div>
+          <p id="erroFormSeparacao" class="mensagem-erro" hidden></p>
+          <p id="sucessoFormSeparacao" class="mensagem-sucesso" hidden></p>
+          <div class="modal-footer modal-footer-separacao">
+            <button type="button" id="btnIniciarSeparacao" class="btn btn-secondary">Iniciar Separação</button>
+            <button type="button" id="btnFinalizarSeparacao" class="btn btn-primary">Finalizar Separação</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="secao-registro-operacional" aria-label="Registro de organização">
+        <h3>2. Organização</h3>
+        <p class="secao-descricao">
+          Feito por quem confere e organiza o pedido para despacho, após a separação estar
+          finalizada. Informe o número do pedido e o seu nome, depois escolha "Iniciar
+          Organização" ou "Finalizar Organização". Ao finalizar, com a separação já concluída,
+          o pedido é finalizado automaticamente.
+        </p>
+        <form id="formRegistroOrganizacao" novalidate>
+          <div class="form-grid">
+            <label>Nº do Pedido*
+              <input type="text" id="campoOrganizacaoNumeroPedido" required>
+            </label>
+            <label>Seu nome*
+              <input type="text" id="campoOrganizacaoOperador" required>
+            </label>
+          </div>
+          <p id="erroFormOrganizacao" class="mensagem-erro" hidden></p>
+          <p id="sucessoFormOrganizacao" class="mensagem-sucesso" hidden></p>
+          <div class="modal-footer modal-footer-separacao">
+            <button type="button" id="btnIniciarOrganizacao" class="btn btn-secondary">Iniciar Organização</button>
+            <button type="button" id="btnFinalizarOrganizacao" class="btn btn-primary">Finalizar Organização</button>
+          </div>
+        </form>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<!-- Modal: pedidos de um grupo do painel consolidado -->
+<div id="modalGrupo" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalGrupoTitulo">
+    <div class="modal-header">
+      <h2 id="modalGrupoTitulo">Pedidos</h2>
+      <button id="btnFecharModalGrupo" class="btn btn-icon" type="button" aria-label="Fechar">✕</button>
+    </div>
+    <div class="modal-body">
+      <ul id="listaModalGrupo" class="lista-modal-grupo"></ul>
+    </div>
+  </div>
+</div>
+
+<div id="statusConexao" class="status-conexao" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
