@@ -727,6 +727,7 @@ tbody tr:last-child td { border-bottom: none; }
   font-weight: 600;
 }
 .form-grid input,
+.form-grid select,
 .form-grid textarea {
   padding: 9px 10px;
   border: 1px solid var(--cor-borda);
