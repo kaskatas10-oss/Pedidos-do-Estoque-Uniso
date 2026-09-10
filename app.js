@@ -83,6 +83,23 @@ const CONFIG_SEPARACAO = {
 };
 
 /* =========================================================================
+   1-C. CONFIGURAÇÃO DO STATUS DE ORGANIZAÇÃO (operacional, independente do
+   SLA e da Separação)
+   -------------------------------------------------------------------------
+   Controla a etapa seguinte à separação: a conferência e organização do
+   pedido para despacho, feita por outra pessoa (a "organizadora"),
+   registrada através do mesmo painel "Registro de Separação" (que passa a
+   ter uma segunda seção, "Organização"). Estruturalmente idêntica a
+   CONFIG_SEPARACAO, mas mantida em um objeto separado porque representa uma
+   etapa física distinta, com seu próprio operador e seus próprios horários.
+   ========================================================================= */
+const CONFIG_ORGANIZACAO = {
+  'a-organizar': { cor: 'var(--cor-perigo)', label: 'A Organizar' },
+  'em-organizacao': { cor: 'var(--cor-alerta)', label: 'Em Organização' },
+  organizado: { cor: 'var(--cor-sucesso)', label: 'Organizado' }
+};
+
+/* =========================================================================
    2. ESTADO GLOBAL DA APLICAÇÃO
    ========================================================================= */
 const estado = {
@@ -424,7 +441,14 @@ async function salvarPedido(dadosFormulario, idExistente) {
       operadorInicioSeparacao: null,
       dataHoraInicioSeparacao: null,
       operadorFimSeparacao: null,
-      dataHoraFimSeparacao: null
+      dataHoraFimSeparacao: null,
+      // Status de organização (operacional): etapa seguinte à separação
+      // (conferência e organização para despacho), feita por outra pessoa.
+      statusOrganizacao: 'a-organizar',
+      operadorInicioOrganizacao: null,
+      dataHoraInicioOrganizacao: null,
+      operadorFimOrganizacao: null,
+      dataHoraFimOrganizacao: null
     });
   }
 }
@@ -450,6 +474,31 @@ async function finalizarSeparacaoPedido(pedido, nomeOperador) {
     operadorFimSeparacao: nomeOperador,
     dataHoraFimSeparacao: serverTimestamp()
   });
+}
+
+async function iniciarOrganizacaoPedido(pedido, nomeOperador) {
+  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
+    statusOrganizacao: 'em-organizacao',
+    operadorInicioOrganizacao: nomeOperador,
+    dataHoraInicioOrganizacao: serverTimestamp()
+  });
+}
+
+// Registra a finalização da organização e, quando a separação já estiver
+// concluída (pré-requisito para a organização ter começado), finaliza o
+// pedido automaticamente - sem precisar do "ticar" manual que existia
+// antes. A lógica de resultado do SLA (calcularResultadoFinalizacao) não
+// muda: continua comparando a data de hoje com o vencimento.
+async function finalizarOrganizacaoPedido(pedido, nomeOperador) {
+  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
+    statusOrganizacao: 'organizado',
+    operadorFimOrganizacao: nomeOperador,
+    dataHoraFimOrganizacao: serverTimestamp()
+  });
+
+  if (pedido.statusSeparacao === 'separado' && pedido.status !== 'finalizado') {
+    await finalizarPedido(pedido);
+  }
 }
 
 async function finalizarPedido(pedido) {
@@ -492,6 +541,7 @@ function renderizarTudo() {
   renderizarTabelaPedidos(pedidosClassificados);
   renderizarHistorico();
   renderizarFaixaAeroporto(pedidosClassificados);
+  renderizarPainelTempos();
 }
 
 function renderizarDashboard(lista) {
@@ -659,24 +709,40 @@ function obterOperadorAtual(pedido) {
   return '-';
 }
 
-// Cria o checkbox de conclusão, reaproveitado pela tabela e pelo cartão.
-function criarCheckboxConclusao(pedido) {
-  const check = document.createElement('input');
-  check.type = 'checkbox';
-  check.checked = pedido.status === 'finalizado';
-  check.setAttribute('aria-label', `Marcar pedido ${pedido.numeroPedido} como concluído`);
-  check.addEventListener('change', () => {
-    if (check.checked) {
-      finalizarPedido(pedido).catch((erro) => alert('Erro ao finalizar pedido: ' + erro.message));
-    } else {
-      reabrirPedido(pedido).catch((erro) => alert('Erro ao reabrir pedido: ' + erro.message));
-    }
-  });
-  return check;
+// Cria o indicador de Status de Organização (bolinha colorida + rótulo),
+// reaproveitado pela tabela e pelo cartão. Independente da Situação (SLA) e
+// do Status de Separação acima; mesma estrutura visual, a partir de
+// CONFIG_ORGANIZACAO.
+function criarBadgeStatusOrganizacao(pedido) {
+  const chave = pedido.statusOrganizacao || 'a-organizar';
+  const info = CONFIG_ORGANIZACAO[chave] || CONFIG_ORGANIZACAO['a-organizar'];
+
+  const span = document.createElement('span');
+  span.className = 'status-separacao';
+  span.title = info.label;
+
+  const bolinha = document.createElement('span');
+  bolinha.className = 'status-separacao-bolinha';
+  bolinha.style.backgroundColor = info.cor;
+  span.appendChild(bolinha);
+
+  span.appendChild(document.createTextNode(info.label));
+  return span;
 }
 
-// Cria os botões Editar/Excluir dentro de um container, reaproveitado pela
-// tabela e pelo cartão.
+// Nome do operador de organização a exibir: mesmo critério de
+// obterOperadorAtual, aplicado à etapa de organização.
+function obterOperadorOrganizacaoAtual(pedido) {
+  if (pedido.statusOrganizacao === 'organizado') return pedido.operadorFimOrganizacao || '-';
+  if (pedido.statusOrganizacao === 'em-organizacao') return pedido.operadorInicioOrganizacao || '-';
+  return '-';
+}
+
+// Cria os botões Editar/Excluir (e Reabrir, quando finalizado) dentro de um
+// container, reaproveitado pela tabela e pelo cartão. A finalização deixou
+// de ser manual (ver finalizarOrganizacaoPedido); "Reabrir" é a forma de
+// corrigir um pedido finalizado por engano, devolvendo-o para "aberto" sem
+// alterar os registros de separação/organização já feitos.
 function criarBotoesAcoes(pedido, container) {
   const btnEditar = document.createElement('button');
   btnEditar.type = 'button';
@@ -685,6 +751,21 @@ function criarBotoesAcoes(pedido, container) {
   btnEditar.disabled = pedido.status === 'finalizado';
   btnEditar.title = pedido.status === 'finalizado' ? 'Pedidos finalizados não podem ser editados' : 'Editar pedido';
   btnEditar.addEventListener('click', () => abrirModalEdicaoPedido(pedido));
+  container.appendChild(btnEditar);
+
+  if (pedido.status === 'finalizado') {
+    const btnReabrir = document.createElement('button');
+    btnReabrir.type = 'button';
+    btnReabrir.className = 'btn btn-link';
+    btnReabrir.textContent = 'Reabrir';
+    btnReabrir.title = 'Reabrir pedido (volta para "aberto"; não altera os registros de separação/organização já feitos)';
+    btnReabrir.addEventListener('click', () => {
+      if (confirm(`Confirma reabrir o pedido ${pedido.numeroPedido}? Ele voltará para "aberto".`)) {
+        reabrirPedido(pedido).catch((erro) => alert('Erro ao reabrir pedido: ' + erro.message));
+      }
+    });
+    container.appendChild(btnReabrir);
+  }
 
   const btnExcluir = document.createElement('button');
   btnExcluir.type = 'button';
@@ -695,8 +776,6 @@ function criarBotoesAcoes(pedido, container) {
       excluirPedido(pedido.id).catch((erro) => alert('Erro ao excluir pedido: ' + erro.message));
     }
   });
-
-  container.appendChild(btnEditar);
   container.appendChild(btnExcluir);
 }
 
@@ -711,6 +790,12 @@ function criarLinhaPedido(pedido) {
       : '') +
     (pedido.dataHoraFimSeparacao
       ? ` • Separação finalizada por ${pedido.operadorFimSeparacao} em ${formatarDataHoraBrasilia(pedido.dataHoraFimSeparacao)} (horário de Brasília)`
+      : '') +
+    (pedido.dataHoraInicioOrganizacao
+      ? ` • Organização iniciada por ${pedido.operadorInicioOrganizacao} em ${formatarDataHoraBrasilia(pedido.dataHoraInicioOrganizacao)} (horário de Brasília)`
+      : '') +
+    (pedido.dataHoraFimOrganizacao
+      ? ` • Organização finalizada por ${pedido.operadorFimOrganizacao} em ${formatarDataHoraBrasilia(pedido.dataHoraFimOrganizacao)} (horário de Brasília)`
       : '');
 
   const celulas = [
@@ -745,10 +830,9 @@ function criarLinhaPedido(pedido) {
   tdObs.className = 'col-observacao';
   tr.appendChild(tdObs);
 
-  const tdCheck = document.createElement('td');
-  tdCheck.className = 'col-check';
-  tdCheck.appendChild(criarCheckboxConclusao(pedido));
-  tr.appendChild(tdCheck);
+  const tdOrganizacao = document.createElement('td');
+  tdOrganizacao.appendChild(criarBadgeStatusOrganizacao(pedido));
+  tr.appendChild(tdOrganizacao);
 
   const tdAcoes = document.createElement('td');
   tdAcoes.className = 'col-acoes';
@@ -792,6 +876,18 @@ function criarCardPedido(pedido) {
   }
   card.appendChild(linhaStatusSeparacao);
 
+  const linhaStatusOrganizacao = document.createElement('div');
+  linhaStatusOrganizacao.className = 'card-pedido-status-separacao';
+  linhaStatusOrganizacao.appendChild(criarBadgeStatusOrganizacao(pedido));
+  const nomeOperadorOrganizacao = obterOperadorOrganizacaoAtual(pedido);
+  if (nomeOperadorOrganizacao !== '-') {
+    const operadorOrgSpan = document.createElement('span');
+    operadorOrgSpan.className = 'card-pedido-operador';
+    operadorOrgSpan.textContent = nomeOperadorOrganizacao;
+    linhaStatusOrganizacao.appendChild(operadorOrgSpan);
+  }
+  card.appendChild(linhaStatusOrganizacao);
+
   const grid = document.createElement('div');
   grid.className = 'card-pedido-grid';
   grid.innerHTML = `
@@ -811,13 +907,6 @@ function criarCardPedido(pedido) {
 
   const rodape = document.createElement('div');
   rodape.className = 'card-pedido-rodape';
-
-  const labelConcluir = document.createElement('label');
-  labelConcluir.className = 'card-pedido-concluir';
-  const check = criarCheckboxConclusao(pedido);
-  labelConcluir.appendChild(check);
-  labelConcluir.appendChild(document.createTextNode('Concluído'));
-  rodape.appendChild(labelConcluir);
 
   const acoes = document.createElement('div');
   acoes.className = 'card-pedido-acoes';
@@ -1008,52 +1097,236 @@ function renderizarFaixaAeroporto(lista) {
 
   montarTrilhoFaixaAeroporto(texto);
 
-  // Cor geral do rodapé: marrom enquanto houver pedidos em aberto (fila com
+  // Cor geral do rodapé: azul enquanto houver pedidos em aberto (fila com
   // trabalho pendente), verde quando não houver nenhum pedido em aberto.
   const rodape = document.getElementById('faixaAeroporto');
   if (rodape) {
-    rodape.classList.remove('marrom', 'verde');
-    rodape.classList.add(abertos.length > 0 ? 'marrom' : 'verde');
+    rodape.classList.remove('pendencias', 'verde');
+    rodape.classList.add(abertos.length > 0 ? 'pendencias' : 'verde');
   }
 }
 
-// Preenche a faixa de rolagem com repetições do texto - o suficiente para
-// que UM conjunto completo já cubra a largura da tela - e então duplica esse
-// conjunto inteiro (para a animação de -50% ficar perfeitamente contínua,
-// sem salto). Isso evita o problema de o texto ficar "preso" numa faixa
-// estreita do lado esquerdo quando há poucos indicadores (texto curto).
-// A velocidade é fixada em pixels por segundo, então a rolagem sempre
-// parece igualmente rápida, independentemente do tamanho do texto.
-const LARGURA_ESTIMADA_POR_CARACTERE_PX = 8.2; // fonte monoespaçada, ~0.85rem
-const ESPACAMENTO_LATERAL_BLOCO_PX = 80; // deve acompanhar o padding definido em .faixa-aeroporto-conteudo no styles.css
+// Preenche a faixa de rolagem com UMA única cópia do texto por vez: ela
+// entra pela borda direita da tela, atravessa e sai pela esquerda, com um
+// intervalo vazio até reaparecer - como um letreiro tradicional de painel
+// de aeroporto (sem várias cópias repetidas lado a lado). A velocidade é
+// fixada em pixels por segundo, então a rolagem sempre parece igualmente
+// rápida, independentemente do tamanho do texto.
 const VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO = 80;
 
 function montarTrilhoFaixaAeroporto(texto) {
   const trilho = document.getElementById('trilhoFaixaAeroporto');
-  if (!trilho) return;
-
-  const larguraJanela = window.innerWidth || document.documentElement.clientWidth || 1200;
-  const larguraBloco = (texto.length * LARGURA_ESTIMADA_POR_CARACTERE_PX) + ESPACAMENTO_LATERAL_BLOCO_PX;
-  const repeticoesPorConjunto = Math.max(1, Math.ceil(larguraJanela / larguraBloco) + 1);
+  const rodape = document.getElementById('faixaAeroporto');
+  if (!trilho || !rodape) return;
 
   trilho.innerHTML = '';
-  let indiceGlobal = 0;
-  for (let copia = 0; copia < 2; copia++) {
-    for (let i = 0; i < repeticoesPorConjunto; i++) {
-      const bloco = document.createElement('div');
-      bloco.className = 'faixa-aeroporto-conteudo';
-      bloco.textContent = texto;
-      // Apenas o primeiro bloco é lido por leitores de tela; as repetições
-      // seguintes existem só para preencher visualmente a rolagem.
-      if (indiceGlobal > 0) bloco.setAttribute('aria-hidden', 'true');
-      trilho.appendChild(bloco);
-      indiceGlobal++;
-    }
+  const bloco = document.createElement('div');
+  bloco.className = 'faixa-aeroporto-conteudo';
+  bloco.textContent = texto;
+  trilho.appendChild(bloco);
+
+  const larguraJanela = rodape.clientWidth || window.innerWidth || 1200;
+  const larguraTexto = bloco.offsetWidth;
+
+  // Posição inicial: totalmente fora da tela, à direita (a uma distância
+  // igual à largura da própria tela). Posição final: totalmente fora da
+  // tela, à esquerda (recuada pela largura do próprio texto).
+  trilho.style.setProperty('--x-inicial-faixa-aeroporto', `${larguraJanela}px`);
+  trilho.style.setProperty('--x-final-faixa-aeroporto', `${-larguraTexto}px`);
+
+  const distanciaTotalPercorrida = larguraJanela + larguraTexto;
+  const duracaoSegundos = Math.max(8, distanciaTotalPercorrida / VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO);
+  trilho.style.setProperty('--duracao-faixa-aeroporto', `${duracaoSegundos}s`);
+}
+
+/* -------------------------------------------------------------------------
+   Painel de Tempos: métricas de separação e organização
+   -------------------------------------------------------------------------
+   Tudo calculado no cliente a partir de estado.pedidos (a mesma coleção do
+   Firestore já usada pelo resto do app) - não é necessário nenhum banco ou
+   coleção adicional. "Concluída" aqui significa pedido com as duas etapas
+   completas (statusSeparacao = 'separado' e statusOrganizacao =
+   'organizado'), o que hoje corresponde exatamente a pedido.status ===
+   'finalizado', já que a finalização passou a ser automática.
+   ------------------------------------------------------------------------- */
+
+// Converte um Timestamp do Firebase (ou Date/ISO) em milissegundos (epoch), ou null.
+function timestampParaMs(timestamp) {
+  if (!timestamp) return null;
+  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  return data.getTime();
+}
+
+// Formata uma duração em milissegundos como "Xh Ymin" (ou só "Ymin" se < 1h).
+function formatarDuracao(ms) {
+  if (ms == null || Number.isNaN(ms) || ms < 0) return '-';
+  const totalMinutos = Math.round(ms / 60000);
+  if (totalMinutos < 1) return '< 1min';
+  const horas = Math.floor(totalMinutos / 60);
+  const minutos = totalMinutos % 60;
+  return horas > 0 ? `${horas}h ${minutos}min` : `${minutos}min`;
+}
+
+// Duração (ms) da etapa de separação de um pedido, ou null se incompleta.
+function duracaoSeparacaoMs(pedido) {
+  const inicio = timestampParaMs(pedido.dataHoraInicioSeparacao);
+  const fim = timestampParaMs(pedido.dataHoraFimSeparacao);
+  return inicio == null || fim == null ? null : fim - inicio;
+}
+
+// Duração (ms) da etapa de organização de um pedido, ou null se incompleta.
+function duracaoOrganizacaoMs(pedido) {
+  const inicio = timestampParaMs(pedido.dataHoraInicioOrganizacao);
+  const fim = timestampParaMs(pedido.dataHoraFimOrganizacao);
+  return inicio == null || fim == null ? null : fim - inicio;
+}
+
+// Duração total (ms) = separação + organização, ou null se qualquer uma das
+// duas etapas ainda não estiver completa.
+function duracaoTotalMs(pedido) {
+  const separacao = duracaoSeparacaoMs(pedido);
+  const organizacao = duracaoOrganizacaoMs(pedido);
+  return separacao == null || organizacao == null ? null : separacao + organizacao;
+}
+
+/**
+ * Agrupa, por operador, o tempo médio de uma etapa (separação ou
+ * organização) e o percentual de participação no volume total de pedidos
+ * com aquela etapa concluída. O tempo é atribuído a quem REGISTROU O FIM da
+ * etapa (operadorFimSeparacao / operadorFimOrganizacao) - premissa adotada
+ * porque, na prática, o mesmo operador normalmente inicia e finaliza a
+ * própria etapa de um pedido.
+ */
+function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao) {
+  const registros = lista
+    .map((pedido) => ({ operador: pedido[campoOperadorFim], duracao: funcaoDuracao(pedido) }))
+    .filter((registro) => registro.operador && registro.duracao != null);
+
+  const totalRegistros = registros.length;
+  const porOperador = new Map();
+  registros.forEach(({ operador, duracao }) => {
+    if (!porOperador.has(operador)) porOperador.set(operador, { somaMs: 0, contagem: 0 });
+    const acumulado = porOperador.get(operador);
+    acumulado.somaMs += duracao;
+    acumulado.contagem += 1;
+  });
+
+  return Array.from(porOperador.entries())
+    .map(([operador, { somaMs, contagem }]) => ({
+      operador,
+      tempoMedioMs: somaMs / contagem,
+      quantidade: contagem,
+      percentual: totalRegistros > 0 ? Math.round((contagem / totalRegistros) * 100) : 0
+    }))
+    .sort((a, b) => b.quantidade - a.quantidade);
+}
+
+function renderizarListaTemposOperador(idLista, idMensagemVazia, dados) {
+  const lista = document.getElementById(idLista);
+  const mensagemVazia = document.getElementById(idMensagemVazia);
+  if (!lista) return;
+  lista.innerHTML = '';
+
+  if (dados.length === 0) {
+    if (mensagemVazia) mensagemVazia.hidden = false;
+    return;
+  }
+  if (mensagemVazia) mensagemVazia.hidden = true;
+
+  dados.forEach((item) => {
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <span class="tempo-operador-nome">${item.operador}</span>
+      <span class="tempo-operador-metricas">
+        <span>${formatarDuracao(item.tempoMedioMs)}</span>
+        <span>${item.percentual}%</span>
+      </span>
+    `;
+    lista.appendChild(li);
+  });
+}
+
+/**
+ * Calcula o histórico diário de tempos (últimos N dias, agrupado pela Data
+ * do Pedido - o mesmo critério usado em "Dias registrados" no indicador
+ * geral). Para cada dia:
+ *   - total: pedidos lançados naquele dia
+ *   - concluidas: quantos, dentre esses, já foram finalizados (separação +
+ *     organização completas)
+ *   - pendentes: total - concluidas
+ *   - status: selo resumindo o andamento do dia (Concluído / Em andamento /
+ *     Pendente / "-" quando não há pedidos naquele dia)
+ *   - tempoMedioMs: tempo médio total (separação + organização) dos
+ *     pedidos concluídos daquele dia
+ *   - percentualEfetuado: concluidas ÷ total do dia
+ */
+function calcularHistoricoTempos(diasJanela = 14) {
+  const hoje = parseDataLocal(hojeISO());
+  const datasJanela = [];
+  for (let i = diasJanela - 1; i >= 0; i--) {
+    const data = new Date(hoje);
+    data.setDate(data.getDate() - i);
+    datasJanela.push(formatarISO(data));
   }
 
-  const larguraConjuntoEstimada = larguraBloco * repeticoesPorConjunto;
-  const duracaoSegundos = Math.max(8, larguraConjuntoEstimada / VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO);
-  trilho.style.setProperty('--duracao-faixa-aeroporto', `${duracaoSegundos}s`);
+  return datasJanela.map((data) => {
+    const grupo = estado.pedidos.filter((pedido) => pedido.dataPedido === data);
+    const total = grupo.length;
+    const concluidos = grupo.filter((pedido) => pedido.status === 'finalizado');
+    const concluidas = concluidos.length;
+    const pendentes = total - concluidas;
+
+    let status;
+    if (total === 0) status = '-';
+    else if (pendentes === 0) status = 'Concluído';
+    else if (concluidas > 0) status = 'Em andamento';
+    else status = 'Pendente';
+
+    const duracoes = concluidos.map(duracaoTotalMs).filter((valor) => valor != null);
+    const tempoMedioMs = duracoes.length > 0 ? duracoes.reduce((soma, valor) => soma + valor, 0) / duracoes.length : null;
+    const percentualEfetuado = total > 0 ? Math.round((concluidas / total) * 100) : null;
+
+    return { data, total, pendentes, status, concluidas, tempoMedioMs, percentualEfetuado };
+  });
+}
+
+function renderizarPainelTempos() {
+  const elTotal = document.getElementById('tempoIndTotal');
+  if (!elTotal) return; // painel ainda não presente no DOM (defensivo)
+
+  const total = estado.pedidos.length;
+  const concluidas = estado.pedidos.filter((pedido) => pedido.status === 'finalizado').length;
+  const pendentes = total - concluidas;
+  const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
+  const diasRegistrados = new Set(estado.pedidos.map((pedido) => pedido.dataPedido).filter(Boolean)).size;
+
+  elTotal.textContent = total;
+  document.getElementById('tempoIndPendentes').textContent = pendentes;
+  document.getElementById('tempoIndConcluidas').textContent = concluidas;
+  document.getElementById('tempoIndDiasRegistrados').textContent = diasRegistrados;
+  document.getElementById('tempoIndTaxaConclusao').textContent = `${taxaConclusao}%`;
+
+  const temposSeparacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimSeparacao', duracaoSeparacaoMs);
+  const temposOrganizacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimOrganizacao', duracaoOrganizacaoMs);
+  renderizarListaTemposOperador('listaTemposSeparacao', 'mensagemVaziaTemposSeparacao', temposSeparacao);
+  renderizarListaTemposOperador('listaTemposOrganizacao', 'mensagemVaziaTemposOrganizacao', temposOrganizacao);
+
+  const historico = calcularHistoricoTempos(14);
+  const corpo = document.getElementById('corpoTabelaHistoricoTempos');
+  corpo.innerHTML = '';
+  historico.forEach((linha) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${formatarBR(linha.data)}</td>
+      <td>${linha.total}</td>
+      <td>${linha.pendentes}</td>
+      <td>${linha.status}</td>
+      <td>${linha.concluidas}</td>
+      <td>${linha.tempoMedioMs != null ? formatarDuracao(linha.tempoMedioMs) : '-'}</td>
+      <td>${linha.percentualEfetuado != null ? linha.percentualEfetuado + '%' : '-'}</td>
+    `;
+    corpo.appendChild(tr);
+  });
 }
 
 /* =========================================================================
@@ -1186,60 +1459,107 @@ function configurarModais() {
 }
 
 /**
- * Alterna entre as duas telas do app: "Painel Operacional" (tela inicial:
- * Painel Consolidado por Prazo, busca e Adicionar Pedido) e "Painel
- * Consolidado" (indicadores, tabela de pedidos e histórico/gráfico),
- * acessada pelo botão 📊 no cabeçalho.
+ * Alterna entre as três telas do app: "Painel Operacional" (tela inicial:
+ * Painel Consolidado por Prazo, busca e Adicionar Pedido), "Painel
+ * Consolidado" (indicadores, tabela de pedidos e histórico/gráfico,
+ * acessada pelo botão 📊) e "Painel de Tempos" (métricas de separação e
+ * organização, acessada pelo botão ⏳). Apenas uma fica visível por vez;
+ * clicar de novo no botão da tela ativa (ou em "Voltar") volta para o
+ * Painel Operacional.
  */
 function configurarNavegacaoTelas() {
   const telaOperacional = document.getElementById('telaOperacional');
-  const telaPainelConsolidado = document.getElementById('telaPainelConsolidado');
-  const botaoCabecalho = document.getElementById('btnPainelConsolidado');
-  const botaoVoltar = document.getElementById('btnVoltarOperacional');
 
-  function mostrarPainelConsolidado() {
-    telaOperacional.hidden = true;
-    telaPainelConsolidado.hidden = false;
-    botaoCabecalho.setAttribute('aria-pressed', 'true');
-    botaoCabecalho.title = 'Voltar ao Painel Operacional';
-  }
+  const telas = {
+    consolidado: document.getElementById('telaPainelConsolidado'),
+    tempos: document.getElementById('telaPainelTempos')
+  };
+  const botoesAbrir = {
+    consolidado: document.getElementById('btnPainelConsolidado'),
+    tempos: document.getElementById('btnPainelTempos')
+  };
+  const titulosBotao = {
+    consolidado: 'Painel Consolidado (indicadores, pedidos e histórico)',
+    tempos: 'Painel de Tempos (separação e organização)'
+  };
 
   function mostrarOperacional() {
-    telaPainelConsolidado.hidden = true;
+    Object.values(telas).forEach((tela) => { if (tela) tela.hidden = true; });
     telaOperacional.hidden = false;
-    botaoCabecalho.setAttribute('aria-pressed', 'false');
-    botaoCabecalho.title = 'Painel Consolidado (indicadores, pedidos e histórico)';
+    Object.entries(botoesAbrir).forEach(([chave, botao]) => {
+      if (!botao) return;
+      botao.setAttribute('aria-pressed', 'false');
+      botao.title = titulosBotao[chave];
+    });
   }
 
-  botaoCabecalho.addEventListener('click', () => {
-    if (telaPainelConsolidado.hidden) mostrarPainelConsolidado();
-    else mostrarOperacional();
-  });
+  function mostrarTela(chave) {
+    telaOperacional.hidden = true;
+    Object.entries(telas).forEach(([k, tela]) => { if (tela) tela.hidden = k !== chave; });
+    Object.entries(botoesAbrir).forEach(([k, botao]) => {
+      if (!botao) return;
+      botao.setAttribute('aria-pressed', String(k === chave));
+      botao.title = k === chave ? 'Voltar ao Painel Operacional' : titulosBotao[k];
+    });
+  }
 
-  if (botaoVoltar) botaoVoltar.addEventListener('click', mostrarOperacional);
+  if (botoesAbrir.consolidado) {
+    botoesAbrir.consolidado.addEventListener('click', () => {
+      if (!telas.consolidado.hidden) mostrarOperacional();
+      else mostrarTela('consolidado');
+    });
+  }
+
+  if (botoesAbrir.tempos) {
+    botoesAbrir.tempos.addEventListener('click', () => {
+      if (!telas.tempos.hidden) mostrarOperacional();
+      else mostrarTela('tempos');
+    });
+  }
+
+  const botaoVoltarConsolidado = document.getElementById('btnVoltarOperacional');
+  if (botaoVoltarConsolidado) botaoVoltarConsolidado.addEventListener('click', mostrarOperacional);
+
+  const botaoVoltarTempos = document.getElementById('btnVoltarOperacionalTempos');
+  if (botaoVoltarTempos) botaoVoltarTempos.addEventListener('click', mostrarOperacional);
 }
 
 /**
- * Modal "Registro de Separação": o operador informa o número do pedido e o
- * próprio nome, e escolhe iniciar ou finalizar a separação física do
- * pedido. A data/hora é gravada pelo servidor (serverTimestamp) e exibida
- * sempre no horário de Brasília, independentemente do relógio do operador.
- * Esse status é totalmente independente da Situação (SLA) e do checkbox
- * "Concluir".
+ * Modal "Registro de Separação e Organização", com duas seções
+ * independentes:
+ *   1. Separação - o operador informa o número do pedido e o próprio nome,
+ *      e escolhe iniciar ou finalizar a separação física do pedido.
+ *   2. Organização - feito por outra pessoa (a organizadora), nos mesmos
+ *      moldes, mas só pode ser iniciada depois que a separação do mesmo
+ *      pedido estiver finalizada. Ao finalizar a organização, se a
+ *      separação já estiver concluída, o pedido é finalizado
+ *      automaticamente (ver finalizarOrganizacaoPedido).
+ * A data/hora de cada registro é gravada pelo servidor (serverTimestamp) e
+ * exibida sempre no horário de Brasília, independentemente do relógio do
+ * operador. Esses status são totalmente independentes da Situação (SLA).
  */
 function configurarModalSeparacao() {
   const modal = document.getElementById('modalSeparacao');
-  const campoNumero = document.getElementById('campoSeparacaoNumeroPedido');
-  const campoOperador = document.getElementById('campoSeparacaoOperador');
-  const erro = document.getElementById('erroFormSeparacao');
-  const sucesso = document.getElementById('sucessoFormSeparacao');
+
+  const campoNumeroSep = document.getElementById('campoSeparacaoNumeroPedido');
+  const campoOperadorSep = document.getElementById('campoSeparacaoOperador');
+  const erroSep = document.getElementById('erroFormSeparacao');
+  const sucessoSep = document.getElementById('sucessoFormSeparacao');
+
+  const campoNumeroOrg = document.getElementById('campoOrganizacaoNumeroPedido');
+  const campoOperadorOrg = document.getElementById('campoOrganizacaoOperador');
+  const erroOrg = document.getElementById('erroFormOrganizacao');
+  const sucessoOrg = document.getElementById('sucessoFormOrganizacao');
 
   function abrirModal() {
     document.getElementById('formRegistroSeparacao').reset();
-    erro.hidden = true;
-    sucesso.hidden = true;
+    document.getElementById('formRegistroOrganizacao').reset();
+    erroSep.hidden = true;
+    sucessoSep.hidden = true;
+    erroOrg.hidden = true;
+    sucessoOrg.hidden = true;
     modal.hidden = false;
-    campoNumero.focus();
+    campoNumeroSep.focus();
   }
 
   function fecharModal() {
@@ -1252,85 +1572,153 @@ function configurarModalSeparacao() {
     if (evento.target.id === 'modalSeparacao') fecharModal();
   });
 
-  // Lê e valida os campos comuns às duas ações; retorna o pedido encontrado
-  // e o nome do operador, ou null (já exibindo a mensagem de erro) se algo
-  // estiver inválido.
-  function lerELocalizarPedido() {
-    erro.hidden = true;
-    sucesso.hidden = true;
+  // Lê e valida os campos de uma das duas seções (separação ou
+  // organização); retorna o pedido encontrado e o nome do operador, ou
+  // null (já exibindo a mensagem de erro no elemento indicado) se algo
+  // estiver inválido. Reaproveitada pelas duas seções.
+  function lerELocalizarPedido(campoNumero, campoOperador, elementoErro, elementoSucesso) {
+    elementoErro.hidden = true;
+    elementoSucesso.hidden = true;
 
     const numero = campoNumero.value.trim();
     const nome = campoOperador.value.trim();
 
     if (!numero || !nome) {
-      erro.textContent = 'Informe o número do pedido e o nome do operador.';
-      erro.hidden = false;
+      elementoErro.textContent = 'Informe o número do pedido e o nome do operador.';
+      elementoErro.hidden = false;
       return null;
     }
 
     const pedido = buscarPedidoPorNumero(numero);
     if (!pedido) {
-      erro.textContent = `Nenhum pedido encontrado com o número "${numero}".`;
-      erro.hidden = false;
+      elementoErro.textContent = `Nenhum pedido encontrado com o número "${numero}".`;
+      elementoErro.hidden = false;
       return null;
     }
 
     return { pedido, nome };
   }
 
+  /* --- Seção 1: Separação --- */
+
   document.getElementById('btnIniciarSeparacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido();
+    const dados = lerELocalizarPedido(campoNumeroSep, campoOperadorSep, erroSep, sucessoSep);
     if (!dados) return;
     const { pedido, nome } = dados;
 
     if (pedido.statusSeparacao === 'em-separacao') {
-      erro.textContent = `O pedido ${pedido.numeroPedido} já está em separação, iniciada por ${pedido.operadorInicioSeparacao}.`;
-      erro.hidden = false;
+      erroSep.textContent = `O pedido ${pedido.numeroPedido} já está em separação, iniciada por ${pedido.operadorInicioSeparacao}.`;
+      erroSep.hidden = false;
       return;
     }
     if (pedido.statusSeparacao === 'separado') {
-      erro.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
-      erro.hidden = false;
+      erroSep.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
+      erroSep.hidden = false;
       return;
     }
 
     try {
       await iniciarSeparacaoPedido(pedido, nome);
-      sucesso.textContent = `Separação do pedido ${pedido.numeroPedido} iniciada por ${nome}.`;
-      sucesso.hidden = false;
-      campoNumero.value = '';
-      campoNumero.focus();
+      sucessoSep.textContent = `Separação do pedido ${pedido.numeroPedido} iniciada por ${nome}.`;
+      sucessoSep.hidden = false;
+      campoNumeroSep.value = '';
+      campoNumeroSep.focus();
     } catch (erroSalvar) {
-      erro.textContent = 'Erro ao registrar início da separação: ' + erroSalvar.message;
-      erro.hidden = false;
+      erroSep.textContent = 'Erro ao registrar início da separação: ' + erroSalvar.message;
+      erroSep.hidden = false;
     }
   });
 
   document.getElementById('btnFinalizarSeparacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido();
+    const dados = lerELocalizarPedido(campoNumeroSep, campoOperadorSep, erroSep, sucessoSep);
     if (!dados) return;
     const { pedido, nome } = dados;
 
     if (pedido.statusSeparacao === 'a-separar' || !pedido.statusSeparacao) {
-      erro.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a separação iniciada.`;
-      erro.hidden = false;
+      erroSep.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a separação iniciada.`;
+      erroSep.hidden = false;
       return;
     }
     if (pedido.statusSeparacao === 'separado') {
-      erro.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
-      erro.hidden = false;
+      erroSep.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
+      erroSep.hidden = false;
       return;
     }
 
     try {
       await finalizarSeparacaoPedido(pedido, nome);
-      sucesso.textContent = `Separação do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
-      sucesso.hidden = false;
-      campoNumero.value = '';
-      campoNumero.focus();
+      sucessoSep.textContent = `Separação do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
+      sucessoSep.hidden = false;
+      campoNumeroSep.value = '';
+      campoNumeroSep.focus();
     } catch (erroSalvar) {
-      erro.textContent = 'Erro ao registrar finalização da separação: ' + erroSalvar.message;
-      erro.hidden = false;
+      erroSep.textContent = 'Erro ao registrar finalização da separação: ' + erroSalvar.message;
+      erroSep.hidden = false;
+    }
+  });
+
+  /* --- Seção 2: Organização --- */
+
+  document.getElementById('btnIniciarOrganizacao').addEventListener('click', async () => {
+    const dados = lerELocalizarPedido(campoNumeroOrg, campoOperadorOrg, erroOrg, sucessoOrg);
+    if (!dados) return;
+    const { pedido, nome } = dados;
+
+    if (pedido.statusSeparacao !== 'separado') {
+      erroOrg.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a separação finalizada. Finalize a separação antes de iniciar a organização.`;
+      erroOrg.hidden = false;
+      return;
+    }
+    if (pedido.statusOrganizacao === 'em-organizacao') {
+      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já está em organização, iniciada por ${pedido.operadorInicioOrganizacao}.`;
+      erroOrg.hidden = false;
+      return;
+    }
+    if (pedido.statusOrganizacao === 'organizado') {
+      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já foi organizado por ${pedido.operadorFimOrganizacao}.`;
+      erroOrg.hidden = false;
+      return;
+    }
+
+    try {
+      await iniciarOrganizacaoPedido(pedido, nome);
+      sucessoOrg.textContent = `Organização do pedido ${pedido.numeroPedido} iniciada por ${nome}.`;
+      sucessoOrg.hidden = false;
+      campoNumeroOrg.value = '';
+      campoNumeroOrg.focus();
+    } catch (erroSalvar) {
+      erroOrg.textContent = 'Erro ao registrar início da organização: ' + erroSalvar.message;
+      erroOrg.hidden = false;
+    }
+  });
+
+  document.getElementById('btnFinalizarOrganizacao').addEventListener('click', async () => {
+    const dados = lerELocalizarPedido(campoNumeroOrg, campoOperadorOrg, erroOrg, sucessoOrg);
+    if (!dados) return;
+    const { pedido, nome } = dados;
+
+    if (pedido.statusOrganizacao === 'a-organizar' || !pedido.statusOrganizacao) {
+      erroOrg.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a organização iniciada.`;
+      erroOrg.hidden = false;
+      return;
+    }
+    if (pedido.statusOrganizacao === 'organizado') {
+      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já foi organizado por ${pedido.operadorFimOrganizacao}.`;
+      erroOrg.hidden = false;
+      return;
+    }
+
+    try {
+      await finalizarOrganizacaoPedido(pedido, nome);
+      sucessoOrg.textContent = pedido.statusSeparacao === 'separado'
+        ? `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}. Pedido concluído automaticamente.`
+        : `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
+      sucessoOrg.hidden = false;
+      campoNumeroOrg.value = '';
+      campoNumeroOrg.focus();
+    } catch (erroSalvar) {
+      erroOrg.textContent = 'Erro ao registrar finalização da organização: ' + erroSalvar.message;
+      erroOrg.hidden = false;
     }
   });
 }
@@ -1398,46 +1786,83 @@ function configurarFormularioInlineNovoPedido() {
   });
 }
 
+/**
+ * Busca e filtros existem em dois lugares: o Painel Operacional (campos
+ * originais, sem sufixo) e o Painel Consolidado (campos com sufixo "2",
+ * entre os indicadores e a lista de pedidos, para facilitar a busca sem
+ * precisar trocar de tela). Os dois conjuntos compartilham o mesmo estado
+ * (estado.filtros) e ficam sempre sincronizados entre si: alterar um
+ * atualiza o outro automaticamente.
+ */
 function configurarFiltrosEBusca() {
-  document.getElementById('campoBusca').addEventListener('input', (evento) => {
-    estado.filtros.texto = evento.target.value;
-    renderizarTudo();
-  });
+  const conjuntosFiltros = [
+    {
+      busca: 'campoBusca', status: 'filtroStatus',
+      recebIni: 'filtroRecebimentoInicio', recebFim: 'filtroRecebimentoFim',
+      vencIni: 'filtroVencimentoInicio', vencFim: 'filtroVencimentoFim',
+      limpar: 'btnLimparFiltros'
+    },
+    {
+      busca: 'campoBusca2', status: 'filtroStatus2',
+      recebIni: 'filtroRecebimentoInicio2', recebFim: 'filtroRecebimentoFim2',
+      vencIni: 'filtroVencimentoInicio2', vencFim: 'filtroVencimentoFim2',
+      limpar: 'btnLimparFiltros2'
+    }
+  ].filter((conjunto) => document.getElementById(conjunto.busca)); // ignora conjuntos ausentes no HTML
 
-  document.getElementById('filtroStatus').addEventListener('change', (evento) => {
-    estado.filtros.status = evento.target.value;
-    renderizarTudo();
-  });
+  function sincronizarCamposComEstado() {
+    conjuntosFiltros.forEach((conjunto) => {
+      document.getElementById(conjunto.busca).value = estado.filtros.texto;
+      document.getElementById(conjunto.status).value = estado.filtros.status;
+      document.getElementById(conjunto.recebIni).value = estado.filtros.recebIni;
+      document.getElementById(conjunto.recebFim).value = estado.filtros.recebFim;
+      document.getElementById(conjunto.vencIni).value = estado.filtros.vencIni;
+      document.getElementById(conjunto.vencFim).value = estado.filtros.vencFim;
+    });
+  }
 
-  document.getElementById('filtroRecebimentoInicio').addEventListener('change', (evento) => {
-    estado.filtros.recebIni = evento.target.value;
-    renderizarTudo();
-  });
+  conjuntosFiltros.forEach((conjunto) => {
+    document.getElementById(conjunto.busca).addEventListener('input', (evento) => {
+      estado.filtros.texto = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
 
-  document.getElementById('filtroRecebimentoFim').addEventListener('change', (evento) => {
-    estado.filtros.recebFim = evento.target.value;
-    renderizarTudo();
-  });
+    document.getElementById(conjunto.status).addEventListener('change', (evento) => {
+      estado.filtros.status = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
 
-  document.getElementById('filtroVencimentoInicio').addEventListener('change', (evento) => {
-    estado.filtros.vencIni = evento.target.value;
-    renderizarTudo();
-  });
+    document.getElementById(conjunto.recebIni).addEventListener('change', (evento) => {
+      estado.filtros.recebIni = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
 
-  document.getElementById('filtroVencimentoFim').addEventListener('change', (evento) => {
-    estado.filtros.vencFim = evento.target.value;
-    renderizarTudo();
-  });
+    document.getElementById(conjunto.recebFim).addEventListener('change', (evento) => {
+      estado.filtros.recebFim = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
 
-  document.getElementById('btnLimparFiltros').addEventListener('click', () => {
-    estado.filtros = { texto: '', status: '', recebIni: '', recebFim: '', vencIni: '', vencFim: '' };
-    document.getElementById('campoBusca').value = '';
-    document.getElementById('filtroStatus').value = '';
-    document.getElementById('filtroRecebimentoInicio').value = '';
-    document.getElementById('filtroRecebimentoFim').value = '';
-    document.getElementById('filtroVencimentoInicio').value = '';
-    document.getElementById('filtroVencimentoFim').value = '';
-    renderizarTudo();
+    document.getElementById(conjunto.vencIni).addEventListener('change', (evento) => {
+      estado.filtros.vencIni = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
+
+    document.getElementById(conjunto.vencFim).addEventListener('change', (evento) => {
+      estado.filtros.vencFim = evento.target.value;
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
+
+    document.getElementById(conjunto.limpar).addEventListener('click', () => {
+      estado.filtros = { texto: '', status: '', recebIni: '', recebFim: '', vencIni: '', vencFim: '' };
+      sincronizarCamposComEstado();
+      renderizarTudo();
+    });
   });
 
   document.getElementById('agrupamentoHistorico').addEventListener('change', (evento) => {
