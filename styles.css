@@ -409,7 +409,7 @@ section {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 760px;
+  table-layout: fixed;
   font-size: 0.86rem;
 }
 
@@ -435,9 +435,14 @@ tbody td {
 tbody tr:hover { background: var(--cor-fundo-elevado); }
 tbody tr:last-child td { border-bottom: none; }
 
-.col-observacao { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.col-check { text-align: center; }
-.col-acoes { white-space: nowrap; text-align: right; }
+.col-observacao { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Sem "white-space: nowrap" de propósito: com a tabela em table-layout:
+   fixed (largura das colunas definida pelo <colgroup>), os botões de Ações
+   podem quebrar para uma segunda linha dentro da própria célula quando
+   necessário, em vez de vazar para fora do quadro ou exigir barra de
+   rolagem horizontal. */
+.col-acoes { text-align: right; }
+.col-acoes .btn-link { white-space: nowrap; }
 
 .mensagem-vazia { color: var(--cor-texto-secundario); text-align: center; padding: 14px; margin: 0; }
 
@@ -480,16 +485,10 @@ tbody tr:last-child td { border-bottom: none; }
 .card-pedido-rodape {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   border-top: 1px solid var(--cor-borda);
   padding-top: 8px;
-}
-.card-pedido-concluir {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.82rem;
 }
 .card-pedido-acoes { display: flex; gap: 4px; }
 
@@ -502,6 +501,10 @@ tbody tr:last-child td { border-bottom: none; }
   font-weight: 700;
   white-space: nowrap;
 }
+/* Na tabela (coluna mais estreita que o cartão), textos longos de badge -
+   como "FINALIZADO (Antecipado Xd)" - quebram em duas linhas dentro da
+   própria célula, em vez de vazar visualmente para a coluna vizinha. */
+#tabelaPedidos td .badge { white-space: normal; text-align: center; }
 
 /* Status de separação (A Separar / Em Separação / Separado): bolinha
    colorida + rótulo, independente da Situação (SLA) acima. Cor definida via
@@ -597,12 +600,13 @@ tbody tr:last-child td { border-bottom: none; }
   transition: background-color 0.3s ease, border-top-color 0.3s ease, color 0.3s ease;
 }
 
-/* Status geral do rodapé: marrom enquanto houver pedidos em aberto,
-   verde quando não houver nenhum pedido em aberto (fila zerada). */
-.faixa-aeroporto.marrom {
-  background: #3a2a1c;
-  color: #f4e3cf;
-  border-top-color: #c9834a;
+/* Status geral do rodapé: azul enquanto houver pedidos em aberto
+   (pendências), verde quando não houver nenhum pedido em aberto (fila
+   zerada). */
+.faixa-aeroporto.pendencias {
+  background: #0d3a63;
+  color: #ffffff;
+  border-top-color: #4a90d9;
 }
 .faixa-aeroporto.verde {
   background: #10331f;
@@ -610,26 +614,28 @@ tbody tr:last-child td { border-bottom: none; }
   border-top-color: #3ddc84;
 }
 
-/* Trilho com o conteúdo duplicado lado a lado: a animação move o trilho até
-   -50% (exatamente a largura de UMA cópia do conteúdo), então o próximo
-   quadro já reinicia com a segunda cópia posicionada onde a primeira
-   começou, criando a rolagem contínua sem salto. */
+/* Rolagem com UMA única cópia do texto por vez: entra pela borda direita da
+   tela, atravessa e sai pela esquerda, com um intervalo vazio até
+   reaparecer - como um letreiro tradicional de painel de aeroporto (sem
+   várias cópias repetidas lado a lado). As posições inicial/final e a
+   duração são calculadas em JavaScript (montarTrilhoFaixaAeroporto, em
+   app.js), a partir da largura real da tela e do texto. */
 .faixa-aeroporto-trilho {
-  display: inline-flex;
-  align-items: center;
+  display: inline-block;
+  white-space: nowrap;
   animation: rolarFaixaAeroporto linear infinite;
   animation-duration: var(--duracao-faixa-aeroporto, 20s);
+  transform: translateX(var(--x-inicial-faixa-aeroporto, 100vw));
 }
 .faixa-aeroporto-conteudo {
   padding: 0 40px;
-  flex: 0 0 auto;
 }
 @keyframes rolarFaixaAeroporto {
-  from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
+  from { transform: translateX(var(--x-inicial-faixa-aeroporto, 100vw)); }
+  to { transform: translateX(var(--x-final-faixa-aeroporto, -100%)); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .faixa-aeroporto-trilho { animation: none; }
+  .faixa-aeroporto-trilho { animation: none; transform: translateX(0); }
 }
 
 /* ---------------------------------------------------------------------
@@ -657,6 +663,23 @@ tbody tr:last-child td { border-bottom: none; }
   overflow-y: auto;
   box-shadow: 0 12px 32px rgba(0,0,0,0.3);
 }
+/* Modal com mais de uma seção interna (ex.: Registro de Separação e
+   Organização), um pouco mais largo para acomodar os dois formulários. */
+.modal-largo { max-width: 640px; }
+
+/* Cada seção interna de um modal com múltiplas etapas (ex.: "1. Separação"
+   / "2. Organização"), separadas por uma linha divisória. */
+.secao-registro-operacional {
+  border-top: 1px solid var(--cor-borda);
+  padding-top: 16px;
+  margin-top: 16px;
+}
+.secao-registro-operacional:first-child {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+.secao-registro-operacional h3 { margin: 0 0 6px; font-size: 0.95rem; }
 
 .modal-header {
   display: flex;
@@ -785,6 +808,12 @@ tbody tr:last-child td { border-bottom: none; }
 :root[data-visualizacao="celular"] .dashboard { grid-template-columns: repeat(2, 1fr); }
 :root[data-visualizacao="celular"] .faixa-aeroporto { font-size: 0.75rem; padding: 10px 14px; }
 :root[data-visualizacao="celular"] .toolbar { flex-direction: column; align-items: stretch; }
+/* Correção: "flex: 1 1 220px" no campo de busca define uma LARGURA de
+   220px no layout normal (linha), mas com o toolbar em coluna (acima) o
+   mesmo valor passa a valer para a ALTURA, deixando o campo de busca
+   gigante (220px de altura) no modo celular. Neste modo, a largura já vem
+   de "align-items: stretch"; a altura deve ser automática (uma linha). */
+:root[data-visualizacao="celular"] .toolbar input[type="search"] { flex-basis: auto; }
 :root[data-visualizacao="celular"] .filtro-data { justify-content: space-between; }
 :root[data-visualizacao="celular"] .form-inline-grid { flex-direction: column; align-items: stretch; }
 :root[data-visualizacao="celular"] .form-inline-grid label,
@@ -793,3 +822,46 @@ tbody tr:last-child td { border-bottom: none; }
 
 :root[data-visualizacao="celular"] #tabelaPedidosWrapper { display: none; }
 :root[data-visualizacao="celular"] .lista-cards-pedidos { display: flex; }
+
+/* ---------------------------------------------------------------------
+   16. Painel de Tempos (separação e organização)
+   --------------------------------------------------------------------- */
+.tempos-operadores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+.tempos-operadores-grupo {
+  border: 1px solid var(--cor-borda);
+  border-radius: var(--raio-padrao);
+  background: var(--cor-fundo-elevado);
+  padding: 12px 14px;
+}
+.tempos-operadores-grupo h3 { margin: 0 0 10px; font-size: 0.9rem; }
+
+.lista-tempos-operador {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lista-tempos-operador li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.85rem;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--cor-borda);
+}
+.lista-tempos-operador li:last-child { border-bottom: none; padding-bottom: 0; }
+.tempo-operador-nome { font-weight: 600; }
+.tempo-operador-metricas {
+  display: flex;
+  gap: 12px;
+  color: var(--cor-texto-secundario);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
