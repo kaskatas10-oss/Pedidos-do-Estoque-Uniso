@@ -37,9 +37,10 @@
  */
 let db, auth, signInAnonymously, onAuthStateChanged;
 let collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, serverTimestamp, query, orderBy;
-let colecaoPedidos;
+let colecaoPedidos, colecaoColaboradores;
 
 const NOME_COLECAO = 'pedidos';
+const NOME_COLECAO_COLABORADORES = 'colaboradores';
 
 /* =========================================================================
    1. CONFIGURAÇÃO CENTRALIZADA DAS FAIXAS DE SLA
@@ -104,6 +105,7 @@ const CONFIG_ORGANIZACAO = {
    ========================================================================= */
 const estado = {
   pedidos: [],               // cache local dos pedidos sincronizados do Firestore
+  colaboradores: [],         // cache local dos colaboradores (separadores/organizadores) cadastrados
   agrupamentoHistorico: 'recebimento',
   filtros: {
     texto: '',
@@ -388,6 +390,7 @@ async function carregarFirebaseEIniciar() {
     orderBy = firestoreModule.orderBy;
 
     colecaoPedidos = collection(db, NOME_COLECAO);
+    colecaoColaboradores = collection(db, NOME_COLECAO_COLABORADORES);
 
     iniciarAutenticacaoEDados();
   } catch (erro) {
@@ -405,6 +408,7 @@ function iniciarAutenticacaoEDados() {
   onAuthStateChanged(auth, (usuario) => {
     if (usuario) {
       escutarPedidosEmTempoReal();
+      escutarColaboradoresEmTempoReal();
     }
   });
 
@@ -433,6 +437,30 @@ function escutarPedidosEmTempoReal() {
         'foram publicadas no console do Firebase (aba Regras). Detalhe: ' + erro.message;
       exibirStatusConexao(mensagem, true);
       atualizarIndicadorSincronizacao('erro', 'Erro de permissão/regras');
+    }
+  );
+}
+
+// Sincroniza em tempo real a coleção "colaboradores" (separadores e
+// organizadores cadastrados). Alimenta as listas suspensas de nome usadas no
+// Registro de Separação/Organização e na correção manual do "Editar
+// Pedido", além da própria tela "Colaboradores". Independente da coleção de
+// pedidos - uma falha aqui não impede a sincronização dos pedidos, e
+// vice-versa.
+function escutarColaboradoresEmTempoReal() {
+  const consulta = query(colecaoColaboradores, orderBy('nome', 'asc'));
+  onSnapshot(
+    consulta,
+    (snapshot) => {
+      estado.colaboradores = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+      popularTodosSelectsOperador();
+      renderizarTelaColaboradores();
+    },
+    (erro) => {
+      const mensagem =
+        'Erro ao sincronizar a lista de colaboradores. Verifique se as regras de firestore.rules ' +
+        'incluem a coleção "colaboradores". Detalhe: ' + erro.message;
+      exibirStatusConexao(mensagem, true);
     }
   );
 }
@@ -512,6 +540,142 @@ async function salvarPedido(dadosFormulario, idExistente) {
 function buscarPedidoPorNumero(numero) {
   const alvo = String(numero).trim().toLowerCase();
   return estado.pedidos.find((pedido) => String(pedido.numeroPedido).trim().toLowerCase() === alvo) || null;
+}
+
+/* -------------------------------------------------------------------------
+   CRUD de Colaboradores (separadores/organizadores cadastrados)
+   ---------------------------------------------------------------------------
+   Substitui o antigo campo de texto livre do nome do operador por uma lista
+   suspensa alimentada por esta coleção, para eliminar erros de digitação que
+   faziam um nome "sumir" do cálculo do Tempo Médio por Operador (ex.:
+   "Jaqueline" digitado como "Jaquelini" vira, para o sistema, outra pessoa).
+   Um colaborador NUNCA é excluído automaticamente por edição/desativação:
+   pedidos já registrados guardam o nome como texto simples (sem vínculo por
+   ID), então renomear, desativar ou excluir um colaborador aqui não altera
+   pedidos já lançados - apenas afeta as opções oferecidas dali em diante.
+   ------------------------------------------------------------------------- */
+
+// Localiza um colaborador pelo nome (comparação sem diferenciar maiúsculas
+// ou espaços nas pontas), usado para impedir cadastro duplicado.
+function buscarColaboradorPorNome(nome) {
+  const alvo = String(nome).trim().toLowerCase();
+  return estado.colaboradores.find((colaborador) => String(colaborador.nome).trim().toLowerCase() === alvo) || null;
+}
+
+async function adicionarColaborador(nome) {
+  await addDoc(colecaoColaboradores, {
+    nome: String(nome).trim(),
+    ativo: true,
+    criadoEm: serverTimestamp()
+  });
+}
+
+async function editarNomeColaborador(colaborador, novoNome) {
+  await updateDoc(doc(db, NOME_COLECAO_COLABORADORES, colaborador.id), { nome: String(novoNome).trim() });
+}
+
+async function alternarAtivoColaborador(colaborador) {
+  await updateDoc(doc(db, NOME_COLECAO_COLABORADORES, colaborador.id), { ativo: !colaborador.ativo });
+}
+
+async function excluirColaborador(colaborador) {
+  await deleteDoc(doc(db, NOME_COLECAO_COLABORADORES, colaborador.id));
+}
+
+// Varre os pedidos já lançados em busca de nomes de separador/organizador
+// (nos 4 campos de operador) que ainda não estejam cadastrados, e os
+// cadastra automaticamente - forma rápida de popular a lista pela primeira
+// vez a partir do histórico existente, sem digitar cada nome manualmente.
+// Nomes que só diferem em maiúsculas/minúsculas são tratados como o mesmo
+// colaborador (mantém a primeira grafia encontrada).
+async function importarColaboradoresDosPedidos() {
+  const nomesEncontrados = new Set();
+  estado.pedidos.forEach((pedido) => {
+    [
+      pedido.operadorInicioSeparacao,
+      pedido.operadorFimSeparacao,
+      pedido.operadorInicioOrganizacao,
+      pedido.operadorFimOrganizacao
+    ].forEach((nome) => {
+      if (nome && String(nome).trim()) nomesEncontrados.add(String(nome).trim());
+    });
+  });
+
+  const vistos = new Set();
+  const paraImportar = [];
+  [...nomesEncontrados].forEach((nome) => {
+    const chave = nome.toLowerCase();
+    if (vistos.has(chave)) return;
+    vistos.add(chave);
+    if (!buscarColaboradorPorNome(nome)) paraImportar.push(nome);
+  });
+
+  for (const nome of paraImportar) {
+    await adicionarColaborador(nome);
+  }
+
+  return { importados: paraImportar.length, jaExistiam: nomesEncontrados.size - paraImportar.length };
+}
+
+// Preenche (ou reconstrói) uma lista suspensa de operador com os
+// colaboradores ATIVOS, em ordem alfabética. `valorParaSelecionar`, quando
+// informado (mesmo que string vazia), define o valor selecionado após
+// preencher; quando omitido, preserva o valor atualmente selecionado no
+// campo (útil ao repopular por causa de uma alteração na lista de
+// colaboradores enquanto um modal já está aberto).
+//
+// Caso o valor a selecionar não corresponda a nenhum colaborador ativo (ex.:
+// nome de um registro histórico cujo colaborador foi desativado/excluído, ou
+// lançado antes deste recurso existir), ele é incluído mesmo assim como uma
+// opção extra rotulada "(não cadastrado)" - para nunca apagar silenciosamente
+// um nome já salvo em um pedido.
+function popularSelectOperador(idSelect, rotuloVazio, valorParaSelecionar) {
+  const select = document.getElementById(idSelect);
+  if (!select) return;
+
+  const valorAlvo = valorParaSelecionar !== undefined ? valorParaSelecionar : select.value;
+
+  select.innerHTML = '';
+
+  const optVazia = document.createElement('option');
+  optVazia.value = '';
+  optVazia.textContent = rotuloVazio;
+  select.appendChild(optVazia);
+
+  const ativos = estado.colaboradores
+    .filter((colaborador) => colaborador.ativo)
+    .slice()
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+
+  const valorAlvoNormalizado = String(valorAlvo).trim().toLowerCase();
+  const existeEntreOsAtivos = ativos.some((c) => c.nome.trim().toLowerCase() === valorAlvoNormalizado);
+  if (valorAlvo && !existeEntreOsAtivos) {
+    const optHistorico = document.createElement('option');
+    optHistorico.value = valorAlvo;
+    optHistorico.textContent = `${valorAlvo} (não cadastrado)`;
+    select.appendChild(optHistorico);
+  }
+
+  ativos.forEach((colaborador) => {
+    const opt = document.createElement('option');
+    opt.value = colaborador.nome;
+    opt.textContent = colaborador.nome;
+    select.appendChild(opt);
+  });
+
+  select.value = valorAlvo;
+}
+
+// Repopula todas as listas suspensas de operador com o estado atual de
+// colaboradores, preservando o que já estiver selecionado em cada uma
+// (chamado sempre que a coleção "colaboradores" é sincronizada).
+function popularTodosSelectsOperador() {
+  popularSelectOperador('campoSeparacaoOperador', 'Selecione seu nome...');
+  popularSelectOperador('campoOrganizacaoOperador', 'Selecione seu nome...');
+  popularSelectOperador('campoEditarOperadorInicioSeparacao', '(nenhum)');
+  popularSelectOperador('campoEditarOperadorFimSeparacao', '(nenhum)');
+  popularSelectOperador('campoEditarOperadorInicioOrganizacao', '(nenhum)');
+  popularSelectOperador('campoEditarOperadorFimOrganizacao', '(nenhum)');
 }
 
 async function iniciarSeparacaoPedido(pedido, nomeOperador) {
@@ -790,6 +954,106 @@ function obterOperadorOrganizacaoAtual(pedido) {
   if (pedido.statusOrganizacao === 'organizado') return pedido.operadorFimOrganizacao || '-';
   if (pedido.statusOrganizacao === 'em-organizacao') return pedido.operadorInicioOrganizacao || '-';
   return '-';
+}
+
+// Indicador de status (bolinha colorida + rótulo) para Ativo/Inativo na tela
+// Colaboradores - mesma estrutura visual usada pelo Status de Separação/
+// Organização (criarBadgeStatusSeparacao/Organizacao), sem depender de
+// CONFIG_SLA nem das outras duas configurações.
+function criarIndicadorAtivoColaborador(ativo) {
+  const span = document.createElement('span');
+  span.className = 'status-separacao';
+  span.title = ativo ? 'Ativo' : 'Inativo';
+
+  const bolinha = document.createElement('span');
+  bolinha.className = 'status-separacao-bolinha';
+  bolinha.style.backgroundColor = ativo ? 'var(--cor-sucesso)' : 'var(--cor-texto-secundario)';
+  span.appendChild(bolinha);
+
+  span.appendChild(document.createTextNode(ativo ? 'Ativo' : 'Inativo'));
+  return span;
+}
+
+// Renderiza a tabela da tela "Colaboradores" a partir de estado.colaboradores.
+// Chamada sempre que a coleção é sincronizada (ver escutarColaboradoresEmTempoReal).
+function renderizarTelaColaboradores() {
+  const corpo = document.getElementById('corpoTabelaColaboradores');
+  if (!corpo) return; // tela pode não estar presente (defensivo)
+
+  const contador = document.getElementById('contadorColaboradores');
+  const vazia = document.getElementById('mensagemColaboradoresVazia');
+
+  const lista = estado.colaboradores.slice().sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  contador.textContent = `(${lista.length})`;
+  vazia.hidden = lista.length > 0;
+  corpo.innerHTML = '';
+
+  lista.forEach((colaborador) => {
+    const tr = document.createElement('tr');
+
+    const tdNome = document.createElement('td');
+    tdNome.textContent = colaborador.nome;
+    tr.appendChild(tdNome);
+
+    const tdStatus = document.createElement('td');
+    tdStatus.appendChild(criarIndicadorAtivoColaborador(colaborador.ativo));
+    tr.appendChild(tdStatus);
+
+    const tdAcoes = document.createElement('td');
+    tdAcoes.className = 'col-acoes';
+
+    const btnEditar = document.createElement('button');
+    btnEditar.type = 'button';
+    btnEditar.className = 'btn btn-link';
+    btnEditar.textContent = 'Editar';
+    btnEditar.addEventListener('click', async () => {
+      const novoNome = prompt('Novo nome para este colaborador:', colaborador.nome);
+      if (novoNome === null) return; // cancelado
+      const nomeTratado = novoNome.trim();
+      if (!nomeTratado || nomeTratado === colaborador.nome) return;
+      const existente = buscarColaboradorPorNome(nomeTratado);
+      if (existente && existente.id !== colaborador.id) {
+        alert(`Já existe um colaborador cadastrado como "${existente.nome}".`);
+        return;
+      }
+      try {
+        await editarNomeColaborador(colaborador, nomeTratado);
+      } catch (erro) {
+        alert('Erro ao editar colaborador: ' + erro.message);
+      }
+    });
+    tdAcoes.appendChild(btnEditar);
+
+    const btnAlternar = document.createElement('button');
+    btnAlternar.type = 'button';
+    btnAlternar.className = 'btn btn-link';
+    btnAlternar.textContent = colaborador.ativo ? 'Desativar' : 'Reativar';
+    btnAlternar.addEventListener('click', async () => {
+      try {
+        await alternarAtivoColaborador(colaborador);
+      } catch (erro) {
+        alert('Erro ao alterar status do colaborador: ' + erro.message);
+      }
+    });
+    tdAcoes.appendChild(btnAlternar);
+
+    const btnExcluir = document.createElement('button');
+    btnExcluir.type = 'button';
+    btnExcluir.className = 'btn btn-link btn-link-perigo';
+    btnExcluir.textContent = 'Excluir';
+    btnExcluir.addEventListener('click', async () => {
+      if (!confirm(`Confirma excluir "${colaborador.nome}" da lista de colaboradores? Pedidos já registrados com este nome NÃO serão alterados.`)) return;
+      try {
+        await excluirColaborador(colaborador);
+      } catch (erro) {
+        alert('Erro ao excluir colaborador: ' + erro.message);
+      }
+    });
+    tdAcoes.appendChild(btnExcluir);
+
+    tr.appendChild(tdAcoes);
+    corpo.appendChild(tr);
+  });
 }
 
 // Cria os botões Editar/Excluir (e Reabrir, quando finalizado) dentro de um
@@ -1413,14 +1677,14 @@ function abrirModalEdicaoPedido(pedido) {
   // Correção manual dos registros de Separação e Organização (nome do
   // operador e data/hora de início e fim, sempre exibidos no horário de
   // Brasília - ver timestampParaDatetimeLocalBrasilia).
-  document.getElementById('campoEditarOperadorInicioSeparacao').value = pedido.operadorInicioSeparacao || '';
+  popularSelectOperador('campoEditarOperadorInicioSeparacao', '(nenhum)', pedido.operadorInicioSeparacao || '');
   document.getElementById('campoEditarDataHoraInicioSeparacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraInicioSeparacao);
-  document.getElementById('campoEditarOperadorFimSeparacao').value = pedido.operadorFimSeparacao || '';
+  popularSelectOperador('campoEditarOperadorFimSeparacao', '(nenhum)', pedido.operadorFimSeparacao || '');
   document.getElementById('campoEditarDataHoraFimSeparacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimSeparacao);
 
-  document.getElementById('campoEditarOperadorInicioOrganizacao').value = pedido.operadorInicioOrganizacao || '';
+  popularSelectOperador('campoEditarOperadorInicioOrganizacao', '(nenhum)', pedido.operadorInicioOrganizacao || '');
   document.getElementById('campoEditarDataHoraInicioOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraInicioOrganizacao);
-  document.getElementById('campoEditarOperadorFimOrganizacao').value = pedido.operadorFimOrganizacao || '';
+  popularSelectOperador('campoEditarOperadorFimOrganizacao', '(nenhum)', pedido.operadorFimOrganizacao || '');
   document.getElementById('campoEditarDataHoraFimOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimOrganizacao);
 
   atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento');
@@ -1634,15 +1898,18 @@ function configurarNavegacaoTelas() {
 
   const telas = {
     consolidado: document.getElementById('telaPainelConsolidado'),
-    tempos: document.getElementById('telaPainelTempos')
+    tempos: document.getElementById('telaPainelTempos'),
+    colaboradores: document.getElementById('telaColaboradores')
   };
   const botoesAbrir = {
     consolidado: document.getElementById('btnPainelConsolidado'),
-    tempos: document.getElementById('btnPainelTempos')
+    tempos: document.getElementById('btnPainelTempos'),
+    colaboradores: document.getElementById('btnColaboradores')
   };
   const titulosBotao = {
     consolidado: 'Painel Consolidado (indicadores, pedidos e histórico)',
-    tempos: 'Painel de Tempos (separação e organização)'
+    tempos: 'Painel de Tempos (separação e organização)',
+    colaboradores: 'Colaboradores (separadores e organizadores cadastrados)'
   };
 
   function mostrarOperacional() {
@@ -1683,11 +1950,21 @@ function configurarNavegacaoTelas() {
     });
   }
 
+  if (botoesAbrir.colaboradores) {
+    botoesAbrir.colaboradores.addEventListener('click', () => {
+      if (!telas.colaboradores.hidden) mostrarOperacional();
+      else mostrarTela('colaboradores');
+    });
+  }
+
   const botaoVoltarConsolidado = document.getElementById('btnVoltarOperacional');
   if (botaoVoltarConsolidado) botaoVoltarConsolidado.addEventListener('click', mostrarOperacional);
 
   const botaoVoltarTempos = document.getElementById('btnVoltarOperacionalTempos');
   if (botaoVoltarTempos) botaoVoltarTempos.addEventListener('click', mostrarOperacional);
+
+  const botaoVoltarColaboradores = document.getElementById('btnVoltarOperacionalColaboradores');
+  if (botaoVoltarColaboradores) botaoVoltarColaboradores.addEventListener('click', mostrarOperacional);
 }
 
 /**
@@ -1720,6 +1997,8 @@ function configurarModalSeparacao() {
   function abrirModal() {
     document.getElementById('formRegistroSeparacao').reset();
     document.getElementById('formRegistroOrganizacao').reset();
+    popularSelectOperador('campoSeparacaoOperador', 'Selecione seu nome...', '');
+    popularSelectOperador('campoOrganizacaoOperador', 'Selecione seu nome...', '');
     erroSep.hidden = true;
     sucessoSep.hidden = true;
     erroOrg.hidden = true;
@@ -1887,6 +2166,73 @@ function configurarModalSeparacao() {
       erroOrg.hidden = false;
     }
   });
+}
+
+/**
+ * Formulário "Adicionar Colaborador" (tela Colaboradores) e botão "Importar
+ * nomes dos pedidos". Mesmo padrão do formulário inline de pedidos: sempre
+ * visível, sem modal, limpa e devolve o foco ao campo após adicionar.
+ */
+function configurarFormularioColaboradores() {
+  const form = document.getElementById('formNovoColaborador');
+  if (!form) return; // tela pode não estar presente (defensivo)
+
+  const erro = document.getElementById('erroFormColaborador');
+
+  form.addEventListener('submit', async (evento) => {
+    evento.preventDefault();
+    erro.hidden = true;
+
+    const campoNome = document.getElementById('campoNovoColaboradorNome');
+    const nome = campoNome.value.trim();
+
+    if (!nome) {
+      erro.textContent = 'Informe o nome do colaborador.';
+      erro.hidden = false;
+      return;
+    }
+
+    const existente = buscarColaboradorPorNome(nome);
+    if (existente) {
+      erro.textContent = existente.ativo
+        ? `Já existe um colaborador cadastrado com o nome "${existente.nome}".`
+        : `Já existe um colaborador com o nome "${existente.nome}", mas está inativo. Reative-o na lista abaixo em vez de cadastrar novamente.`;
+      erro.hidden = false;
+      return;
+    }
+
+    try {
+      await adicionarColaborador(nome);
+      campoNome.value = '';
+      campoNome.focus();
+    } catch (erroSalvar) {
+      erro.textContent = 'Erro ao adicionar colaborador: ' + erroSalvar.message;
+      erro.hidden = false;
+    }
+  });
+
+  const botaoImportar = document.getElementById('btnImportarColaboradores');
+  const mensagemImportar = document.getElementById('mensagemImportarColaboradores');
+  if (botaoImportar) {
+    botaoImportar.addEventListener('click', async () => {
+      botaoImportar.disabled = true;
+      mensagemImportar.hidden = true;
+      try {
+        const resultado = await importarColaboradoresDosPedidos();
+        mensagemImportar.textContent =
+          resultado.importados > 0
+            ? `${resultado.importados} nome(s) importado(s) com sucesso.` +
+              (resultado.jaExistiam > 0 ? ` ${resultado.jaExistiam} já estavam cadastrados.` : '')
+            : 'Nenhum nome novo encontrado - todos os nomes usados nos pedidos já estão cadastrados.';
+        mensagemImportar.hidden = false;
+      } catch (erroImportar) {
+        mensagemImportar.textContent = 'Erro ao importar: ' + erroImportar.message;
+        mensagemImportar.hidden = false;
+      } finally {
+        botaoImportar.disabled = false;
+      }
+    });
+  }
 }
 
 /**
@@ -2200,6 +2546,7 @@ configurarNavegacaoTelas();
 configurarModais();
 configurarModalSeparacao();
 configurarFormularioInlineNovoPedido();
+configurarFormularioColaboradores();
 configurarFiltrosEBusca();
 renderizarTudo();
 carregarFirebaseEIniciar();
