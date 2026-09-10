@@ -1,0 +1,234 @@
+# Controle de SLA de Pedidos — UNISO
+
+Aplicativo web para acompanhamento operacional de prazos (SLA) de pedidos, com
+sincronização em tempo real entre usuários via Firebase (Authentication +
+Cloud Firestore). Construído em HTML5, CSS3 e JavaScript puro (sem
+frameworks e sem etapa de build).
+
+## Estrutura de arquivos
+
+| Arquivo             | Função                                                              |
+|----------------------|----------------------------------------------------------------------|
+| `index.html`         | Estrutura da página (dashboard, painel, tabela, histórico, modais)   |
+| `styles.css`         | Layout, tema claro/escuro e identidade visual                       |
+| `app.js`             | Toda a lógica: cálculo de SLA, CRUD, renderização e eventos          |
+| `firebase-config.js` | Inicialização do Firebase (credenciais do projeto)                  |
+| `firestore.rules`    | Regras de segurança do Cloud Firestore                              |
+| `README.md`          | Este documento                                                      |
+
+## 1. Configuração do Firebase (obrigatória antes do primeiro uso)
+
+O projeto Firebase **"Controle de SLA de Pedidos"** já existe (plano Spark).
+Faltam três passos no console (https://console.firebase.google.com):
+
+### 1.1. Criar o app Web e obter as credenciais ✅ Concluído
+O app Web já foi cadastrado no projeto e `firebase-config.js` já está
+preenchido com as credenciais reais (`apiKey`, `authDomain`, `projectId`,
+`storageBucket`, `messagingSenderId`, `appId`).
+
+> A `apiKey` de um app Web do Firebase não é um segredo — ela é enviada ao
+> navegador de qualquer visitante por design do próprio Google. A proteção
+> real dos dados está nas regras do Firestore (seção 1.3). Como camada
+> extra, especialmente se o repositório for público no GitHub, é possível
+> restringir essa chave por domínio em **Google Cloud Console → APIs e
+> serviços → Credenciais → [selecione a chave] → Restrições de aplicativo
+> → Sites da Web**.
+
+### 1.2. Ativar a autenticação anônima
+1. Menu **Authentication** → aba **Sign-in method**.
+2. Ative o provedor **Anônimo**.
+   > Não há tela de login nem cadastro de usuários no app — a autenticação
+   > anônima serve apenas para autorizar o acesso ao Firestore, conforme
+   > decidido com o solicitante (sem necessidade de perfis de acesso).
+
+### 1.3. Criar o Firestore e publicar as regras
+1. Menu **Firestore Database** → **Criar banco de dados** → modo produção.
+2. Na aba **Regras**, cole o conteúdo de `firestore.rules` e publique.
+   (Ou publique via Firebase CLI: `firebase deploy --only firestore:rules`.)
+
+## 2. Modelo de dados (coleção `pedidos`)
+
+Cada documento representa um pedido:
+
+| Campo                        | Tipo               | Observação                                             |
+|-------------------------------|--------------------|---------------------------------------------------------|
+| `id` (ID do documento)         | string (auto)      | Identificador único gerado pelo Firestore                |
+| `numeroPedido`                 | string             | Número do pedido informado pelo usuário                  |
+| `cliente`                      | string             | Nome do cliente                                          |
+| `dataPedido`                   | string `yyyy-mm-dd`| Data do pedido                                           |
+| `dataRecebimentoEstoque`       | string `yyyy-mm-dd`| Data de recebimento no estoque                            |
+| `slaDias`                      | number             | Prazo de SLA em **dias úteis**                            |
+| `dataVencimento`               | string `yyyy-mm-dd`| Calculada automaticamente (recebimento + SLA em dias úteis) |
+| `observacao`                   | string             | Texto livre                                              |
+| `status`                       | `"aberto"` \| `"finalizado"` | Único estado controlado (sem "em análise"/"cancelado") |
+| `criadoEm`                     | Timestamp (servidor)| Data/hora de criação                                     |
+| `finalizadoEm`                 | Timestamp (servidor) ou `null` | Data/hora de finalização                     |
+| `resultadoSLA`                 | `"antecipado"` \| `"no_prazo"` \| `"atrasado"` \| `null` | Calculado na finalização |
+| `diasDiferencaFinalizacao`     | number \| `null`   | Diferença em dias úteis entre vencimento e finalização    |
+| `statusSeparacao`              | `"a-separar"` \| `"em-separacao"` \| `"separado"` | Fluxo operacional de separação física, **independente** do SLA e do `status` acima |
+| `operadorInicioSeparacao`      | string \| `null`   | Nome digitado pelo operador ao iniciar a separação          |
+| `dataHoraInicioSeparacao`      | Timestamp (servidor) ou `null` | Data/hora de início da separação                |
+| `operadorFimSeparacao`         | string \| `null`   | Nome digitado pelo operador ao finalizar a separação         |
+| `dataHoraFimSeparacao`         | Timestamp (servidor) ou `null` | Data/hora de fim da separação                    |
+
+> Nenhum valor de "dias restantes"/"dias de atraso" é armazenado — tudo é
+> calculado dinamicamente a cada renderização, comparando com a data atual.
+
+> Pedidos criados antes desta atualização não têm os campos de separação
+> gravados no Firestore. O app trata essa ausência como `"a-separar"`
+> automaticamente (nenhuma migração de dados é necessária).
+
+## 3. Premissas assumidas (definidas em conjunto com o solicitante)
+
+Estas decisões foram confirmadas durante o levantamento de requisitos e
+podem ser ajustadas depois, se necessário:
+
+1. **Sem tela de login e sem identificação de usuário.** Não há campos de
+   "usuário criador" nem "usuário responsável pela finalização" — apenas
+   datas/horas de criação e finalização. A autenticação anônima do Firebase
+   é usada apenas como mecanismo técnico invisível para proteger o Firestore.
+2. **Sem perfis/níveis de acesso.** Qualquer sessão autenticada (anônima)
+   tem as mesmas permissões de leitura e escrita.
+3. **Apenas dois status:** `aberto` e `finalizado` (sem "em análise" ou
+   "cancelado").
+4. **Sem campo/filtro de forma de pagamento** (removido do escopo original).
+5. **Todos os prazos são contados em dias úteis** (segunda a sexta-feira),
+   **sem considerar feriados**. Isso vale tanto para o cálculo da data de
+   vencimento quanto para a contagem de dias restantes/atrasados. Caso a
+   UNISO utilize um calendário de feriados, a função `ehDiaUtil()` em
+   `app.js` pode ser estendida para consultá-lo.
+6. **A data de recebimento não conta como um dos dias do prazo** — a
+   contagem começa no dia útil seguinte ao recebimento.
+7. **Cores de atraso:** marrom do 1º ao 4º dia útil de atraso; roxo a
+   partir do 5º dia útil de atraso (configurável em `CONFIG_SLA`, no topo
+   de `app.js`).
+8. **Edição de pedidos** é permitida apenas enquanto o pedido está `aberto`
+   (pedidos finalizados ficam com o histórico travado, preservando a
+   rastreabilidade do resultado do SLA já calculado).
+9. **Histórico operacional:** o campo "Agrupar por" define qual data
+   (recebimento, vencimento ou finalização) determina o dia de cada linha;
+   os pedidos daquele dia são então contados como finalizados/pendentes/
+   atrasados/percentual de conclusão. A janela exibida é de 14 dias.
+10. **Filtros de data** (recebimento e vencimento) foram implementados como
+    intervalos (data inicial/final), permitindo tanto uma data específica
+    quanto um período.
+11. **Duas telas** (adicionado nesta atualização): o app foi dividido em
+    "Painel Operacional" (tela inicial: Painel Consolidado por Prazo, busca/
+    filtros e Adicionar Pedido) e "Painel Consolidado" (indicadores, tabela
+    de pedidos e histórico/gráfico), acessada pelo botão 📊 no cabeçalho. Os
+    filtros de busca ficam na tela operacional e continuam válidos ao
+    navegar para a tabela na outra tela (o estado dos filtros é
+    compartilhado entre as duas telas).
+12. **Status de Separação** (adicionado nesta atualização) é um fluxo
+    totalmente independente da Situação (SLA) e do checkbox "Concluir":
+    acompanha apenas o processo físico de separação do pedido, registrado
+    pelo operador através do botão ⏱️ "Registro de Separação" no cabeçalho.
+13. **Identificação do operador por texto livre**, sem cadastro nem login —
+    coerente com a decisão de não ter perfis de usuário no app (item 1).
+    Nomes digitados de forma diferente (ex.: "João" vs. "joao silva") serão
+    tratados como pessoas diferentes em uma futura análise de tempo médio
+    por operador.
+14. **Horário de Brasília fixo** nos registros de separação
+    (`America/Sao_Paulo`), independentemente do fuso configurado no
+    computador de quem estiver usando o app — para que o tempo entre
+    operadores de máquinas diferentes seja sempre comparável.
+15. **Relatório de tempo médio de separação por operador: fora do escopo
+    desta etapa.** Por ora, o sistema apenas registra os dados (operador e
+    data/hora de início e fim); a tela de relatório fica para uma etapa
+    seguinte, quando já houver volume de dados para analisar.
+
+Todas essas premissas estão comentadas diretamente no código-fonte
+(`app.js`), próximo à lógica correspondente, para facilitar consultas
+futuras.
+
+## 4. Identidade visual
+
+Como não foi fornecido o manual de marca oficial da UNISO, foi utilizada
+uma paleta corporativa neutra (azul institucional, cinzas e branco) como
+placeholder. As variáveis de cor estão centralizadas no topo de
+`styles.css` (`:root`) e podem ser substituídas pelas cores oficiais a
+qualquer momento, sem necessidade de alterar o restante do CSS.
+
+## 5. Como testar localmente
+
+Como o app usa módulos ES (`type="module"`), é necessário servir os
+arquivos por HTTP (abrir o `index.html` diretamente com `file://` bloqueia
+os imports em alguns navegadores). Duas opções simples:
+
+```bash
+# Opção 1 - usando Python (já vem instalado na maioria dos sistemas)
+cd controle-sla-pedidos-uniso
+python3 -m http.server 8080
+# depois acesse http://localhost:8080
+
+# Opção 2 - usando a extensão "Live Server" do VS Code
+```
+
+Após configurar as credenciais (seção 1), abra o navegador com o Console
+(F12) visível para acompanhar eventuais mensagens de erro de conexão.
+
+### Dados de demonstração (opcionais)
+
+Não há dados fictícios carregados automaticamente. Para popular o sistema
+com 3 pedidos de exemplo (úteis para validar visualmente o dashboard e as
+cores de SLA), abra o Console do navegador com o app carregado e execute:
+
+```js
+carregarPedidosDemonstracao()
+```
+
+Os pedidos de teste são criados com o prefixo `DEMO-` no número do pedido
+para facilitar a exclusão manual antes do uso em produção.
+
+## 6. Publicação (GitHub Pages ou Firebase Hosting)
+
+**GitHub Pages:**
+1. Crie um repositório e envie os arquivos deste diretório (mantendo os
+   nomes/estrutura).
+2. Em Settings → Pages, selecione a branch e a pasta raiz.
+3. Preencha `firebase-config.js` com as credenciais reais antes do commit
+   (essas credenciais são públicas por natureza — a segurança real está
+   nas regras do Firestore, não na ocultação dessas chaves).
+
+**Firebase Hosting:**
+```bash
+npm install -g firebase-tools
+firebase login
+firebase init hosting   # aponte o diretório público para esta pasta
+firebase deploy
+```
+
+## 7. Manutenção e extensão
+
+- **Alterar faixas de SLA (dias/cores):** edite o objeto `CONFIG_SLA` no
+  início de `app.js`.
+- **Alterar cores/rótulos do Status de Separação:** edite o objeto
+  `CONFIG_SEPARACAO`, logo abaixo de `CONFIG_SLA` em `app.js`.
+- **Alterar paleta de cores/tema:** edite as variáveis CSS em `:root` e nos
+  blocos `[data-tema="escuro"]` de `styles.css`.
+- **Considerar feriados no cálculo de dias úteis:** ajuste a função
+  `ehDiaUtil()` em `app.js` para consultar uma lista de feriados.
+- Todas as funções em `app.js` têm nomes descritivos em português e
+  comentários explicando seu propósito, conforme solicitado.
+
+## 8. Validação realizada
+
+- Revisão manual da sintaxe de `index.html`, `styles.css`, `app.js` e
+  `firestore.rules`, e checagem automática de sintaxe do JavaScript
+  (`node --check`).
+- Conferência lógica dos cálculos de dias úteis, vencimento e classificação
+  de SLA com casos de teste manuais (datas de exemplo dentro do prazo, no
+  limite e em atraso).
+- Testes automatizados (Playwright, com o Firestore simulado) cobrindo:
+  navegação entre as duas telas, colunas Status/Operador na tabela e nos
+  cartões (modo celular), fluxo completo de Registro de Separação (iniciar,
+  tentar iniciar de novo, finalizar, pedido inexistente), independência
+  entre Status de Separação e Situação (SLA), dark mode, modo celular,
+  rolagem/cores do rodapé, e resiliência da interface quando o Firebase
+  está inacessível (rede bloqueada).
+- **A integração real com o Firebase em produção não foi testada nesta
+  sessão** (o ambiente de desenvolvimento não tem acesso à internet para
+  isso) — os testes acima usam um Firestore simulado. Após publicar estes
+  arquivos, recomenda-se validar no navegador real: sincronização em tempo
+  real entre duas abas/computadores, e o fluxo de Registro de Separação
+  (iniciar em um computador, finalizar em outro).
