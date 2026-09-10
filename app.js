@@ -1520,6 +1520,19 @@ function configurarModais() {
       return;
     }
 
+    const idExistente = document.getElementById('campoPedidoId').value || null;
+
+    // Bloqueia número de pedido duplicado: não pode coincidir com o de OUTRO
+    // pedido já cadastrado (o próprio pedido, sem alteração do número, é
+    // permitido). Comparação sem diferenciar maiúsculas/espaços nas pontas,
+    // igual à usada em buscarPedidoPorNumero().
+    const pedidoComMesmoNumero = buscarPedidoPorNumero(dados.numeroPedido);
+    if (pedidoComMesmoNumero && pedidoComMesmoNumero.id !== idExistente) {
+      erro.textContent = `Já existe um pedido cadastrado com o número "${dados.numeroPedido.trim()}" (cliente: ${pedidoComMesmoNumero.cliente}). Verifique se não é duplicidade antes de salvar.`;
+      erro.hidden = false;
+      return;
+    }
+
     // --- Correção manual dos registros de Separação e Organização ---
     // Lê nome + data/hora (interpretada em horário de Brasília) de cada uma
     // das 4 marcações (início/fim de cada etapa). Nome e data/hora de uma
@@ -1572,8 +1585,6 @@ function configurarModais() {
       dataHoraFimOrganizacao: fimOrg.data,
       statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data)
     };
-
-    const idExistente = document.getElementById('campoPedidoId').value || null;
 
     // Reflete a correção na finalização automática do pedido: se as duas
     // etapas ficaram completas, finaliza (ou reajusta o resultado do SLA,
@@ -1922,6 +1933,15 @@ function configurarFormularioInlineNovoPedido() {
       return;
     }
 
+    // Bloqueia o lançamento se já existir um pedido com o mesmo número
+    // (comparação sem diferenciar maiúsculas/espaços nas pontas).
+    const pedidoComMesmoNumero = buscarPedidoPorNumero(dados.numeroPedido);
+    if (pedidoComMesmoNumero) {
+      erro.textContent = `Já existe um pedido cadastrado com o número "${dados.numeroPedido.trim()}" (cliente: ${pedidoComMesmoNumero.cliente}). Verifique se não é duplicidade antes de lançar.`;
+      erro.hidden = false;
+      return;
+    }
+
     try {
       await salvarPedido(dados, null);
       // Limpa os campos para o próximo lançamento, mantendo a Data do
@@ -1942,21 +1962,15 @@ function configurarFormularioInlineNovoPedido() {
 }
 
 /**
- * Busca e filtros existem em dois lugares: o Painel Operacional (campos
- * originais, sem sufixo) e o Painel Consolidado (campos com sufixo "2",
- * entre os indicadores e a lista de pedidos, para facilitar a busca sem
- * precisar trocar de tela). Os dois conjuntos compartilham o mesmo estado
- * (estado.filtros) e ficam sempre sincronizados entre si: alterar um
- * atualiza o outro automaticamente.
+ * Busca e filtros ficam apenas no Painel Consolidado (campos com sufixo
+ * "2" por razões históricas — chegaram a existir também no Painel
+ * Operacional, hoje removidos de lá por decisão do usuário), entre os
+ * indicadores e a lista de pedidos. A estrutura em "conjuntos" foi mantida
+ * (em vez de referenciar os campos diretamente) para permitir reintroduzir
+ * um segundo conjunto sincronizado no futuro sem reescrever esta função.
  */
 function configurarFiltrosEBusca() {
   const conjuntosFiltros = [
-    {
-      busca: 'campoBusca', status: 'filtroStatus',
-      recebIni: 'filtroRecebimentoInicio', recebFim: 'filtroRecebimentoFim',
-      vencIni: 'filtroVencimentoInicio', vencFim: 'filtroVencimentoFim',
-      limpar: 'btnLimparFiltros'
-    },
     {
       busca: 'campoBusca2', status: 'filtroStatus2',
       recebIni: 'filtroRecebimentoInicio2', recebFim: 'filtroRecebimentoFim2',
