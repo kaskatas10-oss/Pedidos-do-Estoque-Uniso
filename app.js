@@ -164,6 +164,53 @@ function formatarDataHoraBrasilia(timestamp) {
   return data.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 }
 
+/**
+ * Converte um Timestamp (ou Date/ISO) em uma string 'yyyy-mm-ddThh:mm' —
+ * formato aceito pelo input <input type="datetime-local"> — representando
+ * o horário de BRASÍLIA daquele instante (e não o fuso do navegador de
+ * quem está vendo a tela). Usada para pré-preencher os campos de correção
+ * manual dos registros de separação/organização no modal "Editar Pedido".
+ */
+function timestampParaDatetimeLocalBrasilia(timestamp) {
+  if (!timestamp) return '';
+  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const partes = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(data);
+  const obter = (tipo) => partes.find((parte) => parte.type === tipo)?.value || '00';
+  return `${obter('year')}-${obter('month')}-${obter('day')}T${obter('hour')}:${obter('minute')}`;
+}
+
+/**
+ * Caminho inverso de timestampParaDatetimeLocalBrasilia: recebe o valor de
+ * um <input type="datetime-local"> ('yyyy-mm-ddThh:mm') e retorna um objeto
+ * Date representando esse horário de parede em BRASÍLIA (America/Sao_Paulo,
+ * UTC-03:00 fixo - o Brasil aboliu o horário de verão em 2019), não o fuso
+ * do navegador de quem está editando. Retorna null para valor vazio.
+ */
+function datetimeLocalBrasiliaParaData(valor) {
+  if (!valor) return null;
+  return new Date(`${valor}:00-03:00`);
+}
+
+// Deriva o Status de Separação a partir da presença das datas de início e
+// fim, usado ao salvar uma correção manual no modal "Editar Pedido" (para
+// manter o badge sempre consistente com os horários efetivamente salvos).
+function derivarStatusSeparacao(dataHoraInicio, dataHoraFim) {
+  if (dataHoraFim) return 'separado';
+  if (dataHoraInicio) return 'em-separacao';
+  return 'a-separar';
+}
+
+// Equivalente a derivarStatusSeparacao, para o Status de Organização.
+function derivarStatusOrganizacao(dataHoraInicio, dataHoraFim) {
+  if (dataHoraFim) return 'organizado';
+  if (dataHoraInicio) return 'em-organizacao';
+  return 'a-organizar';
+}
+
 // Retorna a data de hoje no formato 'yyyy-mm-dd' (fuso horário local).
 function hojeISO() {
   return formatarISO(new Date());
@@ -427,6 +474,13 @@ async function salvarPedido(dadosFormulario, idExistente) {
   };
 
   if (idExistente) {
+    // Edição manual (correção) dos registros de Separação/Organização e,
+    // quando necessário, da finalização automática do pedido - campos
+    // opcionais, montados em configurarModais() apenas para o formulário
+    // de EDIÇÃO (o formulário inline de novo pedido nunca os envia).
+    if (dadosFormulario.registroSeparacao) Object.assign(dados, dadosFormulario.registroSeparacao);
+    if (dadosFormulario.registroOrganizacao) Object.assign(dados, dadosFormulario.registroOrganizacao);
+    if (dadosFormulario.finalizacao) Object.assign(dados, dadosFormulario.finalizacao);
     await updateDoc(doc(db, NOME_COLECAO, idExistente), dados);
   } else {
     await addDoc(colecaoPedidos, {
@@ -832,6 +886,13 @@ function criarLinhaPedido(pedido) {
 
   const tdOrganizacao = document.createElement('td');
   tdOrganizacao.appendChild(criarBadgeStatusOrganizacao(pedido));
+  const nomeOrganizadorLinha = obterOperadorOrganizacaoAtual(pedido);
+  if (nomeOrganizadorLinha !== '-') {
+    const spanOrganizador = document.createElement('span');
+    spanOrganizador.className = 'organizador-nome';
+    spanOrganizador.textContent = nomeOrganizadorLinha;
+    tdOrganizacao.appendChild(spanOrganizador);
+  }
   tr.appendChild(tdOrganizacao);
 
   const tdAcoes = document.createElement('td');
@@ -1349,6 +1410,19 @@ function abrirModalEdicaoPedido(pedido) {
   document.getElementById('campoSlaDias').value = pedido.slaDias;
   document.getElementById('campoObservacao').value = pedido.observacao || '';
 
+  // Correção manual dos registros de Separação e Organização (nome do
+  // operador e data/hora de início e fim, sempre exibidos no horário de
+  // Brasília - ver timestampParaDatetimeLocalBrasilia).
+  document.getElementById('campoEditarOperadorInicioSeparacao').value = pedido.operadorInicioSeparacao || '';
+  document.getElementById('campoEditarDataHoraInicioSeparacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraInicioSeparacao);
+  document.getElementById('campoEditarOperadorFimSeparacao').value = pedido.operadorFimSeparacao || '';
+  document.getElementById('campoEditarDataHoraFimSeparacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimSeparacao);
+
+  document.getElementById('campoEditarOperadorInicioOrganizacao').value = pedido.operadorInicioOrganizacao || '';
+  document.getElementById('campoEditarDataHoraInicioOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraInicioOrganizacao);
+  document.getElementById('campoEditarOperadorFimOrganizacao').value = pedido.operadorFimOrganizacao || '';
+  document.getElementById('campoEditarDataHoraFimOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimOrganizacao);
+
   atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento');
   document.getElementById('modalPedido').hidden = false;
   document.getElementById('campoNumeroPedido').focus();
@@ -1446,7 +1520,83 @@ function configurarModais() {
       return;
     }
 
+    // --- Correção manual dos registros de Separação e Organização ---
+    // Lê nome + data/hora (interpretada em horário de Brasília) de cada uma
+    // das 4 marcações (início/fim de cada etapa). Nome e data/hora de uma
+    // mesma marcação devem ser preenchidos juntos (ou os dois vazios, para
+    // remover aquele registro).
+    function lerMarcacao(idCampoOperador, idCampoData, rotulo) {
+      const nome = document.getElementById(idCampoOperador).value.trim();
+      const valorData = document.getElementById(idCampoData).value;
+      if (!nome && !valorData) return { nome: null, data: null };
+      if (!nome || !valorData) {
+        throw new Error(`Preencha o nome do operador e a data/hora de ${rotulo}, ou deixe os dois em branco.`);
+      }
+      return { nome, data: datetimeLocalBrasiliaParaData(valorData) };
+    }
+
+    let inicioSep, fimSep, inicioOrg, fimOrg;
+    try {
+      inicioSep = lerMarcacao('campoEditarOperadorInicioSeparacao', 'campoEditarDataHoraInicioSeparacao', 'início da separação');
+      fimSep = lerMarcacao('campoEditarOperadorFimSeparacao', 'campoEditarDataHoraFimSeparacao', 'fim da separação');
+      inicioOrg = lerMarcacao('campoEditarOperadorInicioOrganizacao', 'campoEditarDataHoraInicioOrganizacao', 'início da organização');
+      fimOrg = lerMarcacao('campoEditarOperadorFimOrganizacao', 'campoEditarDataHoraFimOrganizacao', 'fim da organização');
+    } catch (erroValidacao) {
+      erro.textContent = erroValidacao.message;
+      erro.hidden = false;
+      return;
+    }
+
+    if (fimSep.data && inicioSep.data && fimSep.data < inicioSep.data) {
+      erro.textContent = 'O fim da separação não pode ser antes do início da separação.';
+      erro.hidden = false;
+      return;
+    }
+    if (fimOrg.data && inicioOrg.data && fimOrg.data < inicioOrg.data) {
+      erro.textContent = 'O fim da organização não pode ser antes do início da organização.';
+      erro.hidden = false;
+      return;
+    }
+
+    dados.registroSeparacao = {
+      operadorInicioSeparacao: inicioSep.nome,
+      dataHoraInicioSeparacao: inicioSep.data,
+      operadorFimSeparacao: fimSep.nome,
+      dataHoraFimSeparacao: fimSep.data,
+      statusSeparacao: derivarStatusSeparacao(inicioSep.data, fimSep.data)
+    };
+    dados.registroOrganizacao = {
+      operadorInicioOrganizacao: inicioOrg.nome,
+      dataHoraInicioOrganizacao: inicioOrg.data,
+      operadorFimOrganizacao: fimOrg.nome,
+      dataHoraFimOrganizacao: fimOrg.data,
+      statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data)
+    };
+
     const idExistente = document.getElementById('campoPedidoId').value || null;
+
+    // Reflete a correção na finalização automática do pedido: se as duas
+    // etapas ficaram completas, finaliza (ou reajusta o resultado do SLA,
+    // usando a data efetiva da correção); se deixaram de estar completas
+    // (ex.: apagaram um horário por engano), reabre o pedido. Mantém tudo
+    // consistente com a mesma regra usada em finalizarOrganizacaoPedido().
+    if (idExistente) {
+      const pedidoAtual = estado.pedidos.find((p) => p.id === idExistente);
+      const ambasEtapasCompletas =
+        dados.registroSeparacao.statusSeparacao === 'separado' &&
+        dados.registroOrganizacao.statusOrganizacao === 'organizado';
+
+      if (pedidoAtual && ambasEtapasCompletas && pedidoAtual.status !== 'finalizado') {
+        const dataFinalizacao = new Date(Math.max(fimSep.data.getTime(), fimOrg.data.getTime()));
+        const { resultadoSLA, diasDiferencaFinalizacao } = calcularResultadoFinalizacao(
+          { dataVencimento: pedidoAtual.dataVencimento },
+          formatarISO(dataFinalizacao)
+        );
+        dados.finalizacao = { status: 'finalizado', finalizadoEm: dataFinalizacao, resultadoSLA, diasDiferencaFinalizacao };
+      } else if (pedidoAtual && !ambasEtapasCompletas && pedidoAtual.status === 'finalizado') {
+        dados.finalizacao = { status: 'aberto', finalizadoEm: null, resultadoSLA: null, diasDiferencaFinalizacao: null };
+      }
+    }
 
     try {
       await salvarPedido(dados, idExistente);
@@ -1469,6 +1619,7 @@ function configurarModais() {
  */
 function configurarNavegacaoTelas() {
   const telaOperacional = document.getElementById('telaOperacional');
+  const botaoOperacional = document.getElementById('btnPainelOperacional');
 
   const telas = {
     consolidado: document.getElementById('telaPainelConsolidado'),
@@ -1491,6 +1642,7 @@ function configurarNavegacaoTelas() {
       botao.setAttribute('aria-pressed', 'false');
       botao.title = titulosBotao[chave];
     });
+    if (botaoOperacional) botaoOperacional.setAttribute('aria-pressed', 'true');
   }
 
   function mostrarTela(chave) {
@@ -1501,7 +1653,10 @@ function configurarNavegacaoTelas() {
       botao.setAttribute('aria-pressed', String(k === chave));
       botao.title = k === chave ? 'Voltar ao Painel Operacional' : titulosBotao[k];
     });
+    if (botaoOperacional) botaoOperacional.setAttribute('aria-pressed', 'false');
   }
+
+  if (botaoOperacional) botaoOperacional.addEventListener('click', mostrarOperacional);
 
   if (botoesAbrir.consolidado) {
     botoesAbrir.consolidado.addEventListener('click', () => {
