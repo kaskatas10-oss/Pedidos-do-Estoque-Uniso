@@ -1,2036 +1,358 @@
-/**
- * app.js
- * ===========================================================================
- * Controle de SLA de Pedidos - UNISO
- * ---------------------------------------------------------------------------
- * Aplicativo web para acompanhamento operacional de prazos (SLA) de pedidos,
- * com sincronização em tempo real via Cloud Firestore.
- *
- * Este arquivo está organizado nas seguintes seções:
- *   1. Configuração centralizada das faixas de SLA
- *   2. Estado global da aplicação
- *   3. Utilitários de data (cálculo em dias úteis)
- *   4. Cálculo e classificação de SLA
- *   5. Integração com o Firebase (Authentication + Firestore)
- *   6. Operações de CRUD dos pedidos
- *   7. Renderização de interface (dashboard, painel, tabela, histórico, SVG)
- *   8. Modais (novo/editar pedido e detalhamento de grupo)
- *   9. Filtros, busca e eventos de interface
- *  10. Tema claro/escuro (dark mode) e modo celular (visualização manual)
- *  11. Dados de demonstração (opcional, não executado automaticamente)
- *  12. Inicialização da aplicação
- * ===========================================================================
- */
-
-/**
- * IMPORTANTE: o Firebase (firebase-config.js e o SDK do Firestore, carregado
- * do CDN gstatic.com) é importado de forma DINÂMICA dentro de
- * carregarFirebaseEIniciar() (seção 5), em vez de um "import" estático no
- * topo do arquivo. Isso é proposital: um "import" estático que falha (rede
- * bloqueada, firewall corporativo, extensão de bloqueio de anúncios, erro
- * nas credenciais) impede a execução de TODO o resto do app.js - inclusive
- * funções que não têm nada a ver com o Firebase, como o dark mode, o modo
- * celular e a validação dos formulários. Com o import dinâmico, uma falha
- * ali é capturada e tratada (mostra o indicador vermelho no cabeçalho e uma
- * mensagem de erro), enquanto o restante da interface continua funcionando
- * normalmente.
- */
-let db, auth, signInAnonymously, onAuthStateChanged;
-let collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, serverTimestamp, query, orderBy;
-let colecaoPedidos;
-
-const NOME_COLECAO = 'pedidos';
-
-/* =========================================================================
-   1. CONFIGURAÇÃO CENTRALIZADA DAS FAIXAS DE SLA
-   -------------------------------------------------------------------------
-   Todos os limites de classificação visual do SLA ficam concentrados aqui
-   para facilitar alterações futuras sem precisar alterar a lógica do
-   restante do sistema. Todas as contagens de dias são em DIAS ÚTEIS
-   (segunda a sexta-feira), sem considerar feriados.
-   ========================================================================= */
-const CONFIG_SLA = {
-  // Regras de classificação (em dias úteis restantes até o vencimento)
-  diasRestantesAmarelo: 3,        // exatamente 3 dias úteis restantes = amarelo
-  diasRestantesVermelhoMin: 1,    // 1 ou 2 dias úteis restantes = vermelho
-  diasRestantesVermelhoMax: 2,
-  diasAtrasoMarromMax: 4,         // do 1º ao 4º dia útil de atraso = marrom
-  diasAtrasoRoxoMin: 5,           // a partir do 5º dia útil de atraso = roxo
-
-  // Cores e rótulos usados nos badges, cartões e no painel consolidado
-  cores: {
-    verde: { bg: '#e3f4e8', texto: '#1e7d34', label: 'No prazo' },
-    amarelo: { bg: '#fff6d9', texto: '#8a6100', label: 'Atenção' },
-    vermelho: { bg: '#fbe4e4', texto: '#c11e1e', label: 'Crítico' },
-    'vence-hoje': { bg: '#fbe4e4', texto: '#c11e1e', label: 'Vence hoje' },
-    marrom: { bg: '#efe1d5', texto: '#7a4a24', label: 'Atrasado' },
-    roxo: { bg: '#ecdff5', texto: '#6a1b9a', label: 'Atrasado' },
-    finalizado: { bg: '#eceff1', texto: '#546e7a', label: 'Finalizado' }
-  }
-};
-
-/* =========================================================================
-   1-B. CONFIGURAÇÃO DO STATUS DE SEPARAÇÃO (operacional, independente do SLA)
-   -------------------------------------------------------------------------
-   Controla o fluxo físico de separação do pedido (registrado pelo operador
-   através do botão "Registro de Separação"), sem nenhuma relação com a
-   Situação (prazo do SLA) nem com o checkbox "Concluir" definidos acima.
-   ========================================================================= */
-const CONFIG_SEPARACAO = {
-  'a-separar': { cor: 'var(--cor-perigo)', label: 'A Separar' },
-  'em-separacao': { cor: 'var(--cor-alerta)', label: 'Em Separação' },
-  separado: { cor: 'var(--cor-sucesso)', label: 'Separado' }
-};
-
-/* =========================================================================
-   1-C. CONFIGURAÇÃO DO STATUS DE ORGANIZAÇÃO (operacional, independente do
-   SLA e da Separação)
-   -------------------------------------------------------------------------
-   Controla a etapa seguinte à separação: a conferência e organização do
-   pedido para despacho, feita por outra pessoa (a "organizadora"),
-   registrada através do mesmo painel "Registro de Separação" (que passa a
-   ter uma segunda seção, "Organização"). Estruturalmente idêntica a
-   CONFIG_SEPARACAO, mas mantida em um objeto separado porque representa uma
-   etapa física distinta, com seu próprio operador e seus próprios horários.
-   ========================================================================= */
-const CONFIG_ORGANIZACAO = {
-  'a-organizar': { cor: 'var(--cor-perigo)', label: 'A Organizar' },
-  'em-organizacao': { cor: 'var(--cor-alerta)', label: 'Em Organização' },
-  organizado: { cor: 'var(--cor-sucesso)', label: 'Organizado' }
-};
-
-/* =========================================================================
-   2. ESTADO GLOBAL DA APLICAÇÃO
-   ========================================================================= */
-const estado = {
-  pedidos: [],               // cache local dos pedidos sincronizados do Firestore
-  agrupamentoHistorico: 'recebimento',
-  filtros: {
-    texto: '',
-    status: '',
-    recebIni: '',
-    recebFim: '',
-    vencIni: '',
-    vencFim: ''
-  }
-};
-
-/* =========================================================================
-   3. UTILITÁRIOS DE DATA (CÁLCULO EM DIAS ÚTEIS)
-   ========================================================================= */
-
-// Verifica se uma data (objeto Date) cai em dia útil (segunda a sexta).
-function ehDiaUtil(data) {
-  const diaSemana = data.getDay(); // 0 = domingo, 6 = sábado
-  return diaSemana !== 0 && diaSemana !== 6;
-}
-
-// Converte uma string 'yyyy-mm-dd' em um objeto Date à meia-noite local.
-function parseDataLocal(stringISO) {
-  const [ano, mes, dia] = stringISO.split('-').map(Number);
-  return new Date(ano, mes - 1, dia);
-}
-
-// Converte um objeto Date em string 'yyyy-mm-dd'.
-function formatarISO(data) {
-  const ano = data.getFullYear();
-  const mes = String(data.getMonth() + 1).padStart(2, '0');
-  const dia = String(data.getDate()).padStart(2, '0');
-  return `${ano}-${mes}-${dia}`;
-}
-
-// Converte uma string 'yyyy-mm-dd' em 'dd/mm/aaaa' para exibição.
-function formatarBR(stringISO) {
-  if (!stringISO) return '-';
-  const [ano, mes, dia] = stringISO.split('-');
-  return `${dia}/${mes}/${ano}`;
-}
-
-// Converte um Timestamp do Firebase (ou Date/ISO) em 'dd/mm/aaaa hh:mm'.
-function formatarDataHoraBR(timestamp) {
-  if (!timestamp) return '-';
-  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-  return data.toLocaleString('pt-BR');
-}
-
-// Igual a formatarDataHoraBR, mas fixando o fuso horário de Brasília
-// (America/Sao_Paulo), independentemente do fuso configurado no computador
-// de quem estiver vendo a tela. Usada nos registros de separação, para que
-// o tempo medido entre operadores de computadores diferentes seja sempre
-// comparável na mesma referência de horário.
-function formatarDataHoraBrasilia(timestamp) {
-  if (!timestamp) return '-';
-  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-  return data.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-}
-
-// Retorna a data de hoje no formato 'yyyy-mm-dd' (fuso horário local).
-function hojeISO() {
-  return formatarISO(new Date());
-}
-
-// Converte um Timestamp do Firebase em string 'yyyy-mm-dd' (ou null).
-function timestampParaISO(timestamp) {
-  if (!timestamp) return null;
-  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-  return formatarISO(data);
-}
-
-/**
- * Soma (ou subtrai, se o valor for negativo) uma quantidade de dias úteis
- * a partir de uma data inicial. O dia inicial NÃO é contado como um dos
- * dias do prazo - a contagem começa a partir do próximo dia.
- * Usada tanto para calcular vencimentos quanto para gerar dados de teste.
- */
-function somarDiasUteis(stringISOInicial, quantidadeDiasUteis) {
-  const quantidade = Math.trunc(quantidadeDiasUteis);
-  const direcao = quantidade >= 0 ? 1 : -1;
-  let restante = Math.abs(quantidade);
-  const cursor = parseDataLocal(stringISOInicial);
-  while (restante > 0) {
-    cursor.setDate(cursor.getDate() + direcao);
-    if (ehDiaUtil(cursor)) {
-      restante--;
-    }
-  }
-  return formatarISO(cursor);
-}
-
-/**
- * Calcula a diferença em DIAS ÚTEIS entre duas datas (strings 'yyyy-mm-dd').
- * Retorna um número positivo se dataFinal for depois de dataInicial,
- * negativo se for antes, e 0 se forem iguais.
- */
-function diferencaEmDiasUteis(dataInicialISO, dataFinalISO) {
-  if (dataInicialISO === dataFinalISO) return 0;
-  const sinal = dataFinalISO > dataInicialISO ? 1 : -1;
-  const cursor = parseDataLocal(dataInicialISO);
-  const alvoISO = dataFinalISO;
-  let contagem = 0;
-  while (formatarISO(cursor) !== alvoISO) {
-    cursor.setDate(cursor.getDate() + sinal);
-    if (ehDiaUtil(cursor)) {
-      contagem += sinal;
-    }
-  }
-  return contagem;
-}
-
-/* =========================================================================
-   4. CÁLCULO E CLASSIFICAÇÃO DE SLA
-   ========================================================================= */
-
-// Calcula a data de vencimento a partir da data de recebimento + SLA (dias úteis).
-function calcularDataVencimento(dataRecebimentoISO, slaDias) {
-  return somarDiasUteis(dataRecebimentoISO, Number(slaDias));
-}
-
-/**
- * Classifica um pedido de acordo com a configuração central de SLA.
- * Retorna um objeto com: chave, label, bg, texto, diasRestantes (e
- * diasAtraso quando aplicável). Pedidos finalizados sempre retornam a
- * chave 'finalizado'.
- */
-function classificarPedido(pedido) {
-  if (pedido.status === 'finalizado') {
-    return { chave: 'finalizado', diasRestantes: null, ...CONFIG_SLA.cores.finalizado };
-  }
-
-  const diasRestantes = diferencaEmDiasUteis(hojeISO(), pedido.dataVencimento);
-
-  if (diasRestantes > CONFIG_SLA.diasRestantesAmarelo) {
-    return { chave: 'verde', diasRestantes, ...CONFIG_SLA.cores.verde };
-  }
-  if (diasRestantes === CONFIG_SLA.diasRestantesAmarelo) {
-    return { chave: 'amarelo', diasRestantes, ...CONFIG_SLA.cores.amarelo };
-  }
-  if (diasRestantes >= CONFIG_SLA.diasRestantesVermelhoMin && diasRestantes <= CONFIG_SLA.diasRestantesVermelhoMax) {
-    return { chave: 'vermelho', diasRestantes, ...CONFIG_SLA.cores.vermelho };
-  }
-  if (diasRestantes === 0) {
-    return { chave: 'vence-hoje', diasRestantes, ...CONFIG_SLA.cores['vence-hoje'] };
-  }
-
-  // diasRestantes < 0: pedido em atraso
-  const diasAtraso = Math.abs(diasRestantes);
-  if (diasAtraso <= CONFIG_SLA.diasAtrasoMarromMax) {
-    return { chave: 'marrom', diasRestantes, diasAtraso, ...CONFIG_SLA.cores.marrom };
-  }
-  return { chave: 'roxo', diasRestantes, diasAtraso, ...CONFIG_SLA.cores.roxo };
-}
-
-/**
- * Calcula o resultado da finalização de um pedido: se foi concluído
- * antecipadamente, no prazo ou com atraso, e a diferença em dias úteis.
- */
-function calcularResultadoFinalizacao(pedido, dataFinalizacaoISO) {
-  const diferenca = diferencaEmDiasUteis(pedido.dataVencimento, dataFinalizacaoISO);
-  let resultadoSLA;
-  if (diferenca > 0) resultadoSLA = 'atrasado';
-  else if (diferenca < 0) resultadoSLA = 'antecipado';
-  else resultadoSLA = 'no_prazo';
-  return { resultadoSLA, diasDiferencaFinalizacao: Math.abs(diferenca) };
-}
-
-// Ordem de criticidade usada para ordenar a lista de pedidos.
-function ordemCriticidade(classificacao) {
-  const mapa = {
-    roxo: 0,
-    marrom: 1,
-    'vence-hoje': 2,
-    vermelho: 3,
-    amarelo: 4,
-    verde: 5,
-    finalizado: 6
-  };
-  return mapa[classificacao.chave] ?? 9;
-}
-
-// Texto exibido no badge de situação de cada pedido.
-function textoSituacao(pedido, classificacao) {
-  if (pedido.status === 'finalizado') {
-    if (pedido.resultadoSLA === 'antecipado') return `FINALIZADO (Antecipado ${pedido.diasDiferencaFinalizacao}d)`;
-    if (pedido.resultadoSLA === 'atrasado') return `FINALIZADO (Atrasado ${pedido.diasDiferencaFinalizacao}d)`;
-    return 'FINALIZADO (No prazo)';
-  }
-  if (classificacao.chave === 'vence-hoje') return 'VENCE HOJE';
-  if (classificacao.chave === 'marrom' || classificacao.chave === 'roxo') {
-    return `PEDIDO ATRASADO (${classificacao.diasAtraso}d)`;
-  }
-  if (classificacao.diasRestantes === 1) return 'Vence em 1 dia';
-  return `Vence em ${classificacao.diasRestantes} dias`;
-}
-
-/* =========================================================================
-   5. INTEGRAÇÃO COM O FIREBASE (AUTHENTICATION + FIRESTORE)
-   -------------------------------------------------------------------------
-   Usa autenticação anônima apenas para autorizar o acesso ao Firestore
-   (não existe tela de login nem identificação de usuário no app).
-   ========================================================================= */
-
-// Carrega o Firebase (config + SDKs de Authentication e Firestore) usando
-// import() DINÂMICO, e só então inicia a autenticação anônima e a escuta em
-// tempo real. Qualquer falha nesta função - rede bloqueada, firewall
-// corporativo, CDN inacessível, config inválida - é capturada aqui e não
-// afeta o resto da interface (dark mode, modo celular, formulário), que já
-// foi inicializada antes desta função ser chamada (ver seção 12).
-async function carregarFirebaseEIniciar() {
-  atualizarIndicadorSincronizacao('conectando');
-
-  try {
-    const [configModule, appModule, authModule, firestoreModule] = await Promise.all([
-      import('./firebase-config.js'),
-      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js'),
-      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js'),
-      import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js')
-    ]);
-
-    db = configModule.db;
-    auth = configModule.auth;
-    signInAnonymously = authModule.signInAnonymously;
-    onAuthStateChanged = authModule.onAuthStateChanged;
-
-    collection = firestoreModule.collection;
-    addDoc = firestoreModule.addDoc;
-    updateDoc = firestoreModule.updateDoc;
-    deleteDoc = firestoreModule.deleteDoc;
-    doc = firestoreModule.doc;
-    onSnapshot = firestoreModule.onSnapshot;
-    serverTimestamp = firestoreModule.serverTimestamp;
-    query = firestoreModule.query;
-    orderBy = firestoreModule.orderBy;
-
-    colecaoPedidos = collection(db, NOME_COLECAO);
-
-    iniciarAutenticacaoEDados();
-  } catch (erro) {
-    const mensagem =
-      'Não foi possível carregar o Firebase. Verifique sua conexão de rede (o site precisa ' +
-      'acessar www.gstatic.com e googleapis.com - firewalls corporativos, bloqueadores de ' +
-      'anúncios ou redes restritas podem impedir isso) e se o arquivo firebase-config.js foi ' +
-      'enviado ao repositório. Detalhe: ' + erro.message;
-    exibirStatusConexao(mensagem, true);
-    atualizarIndicadorSincronizacao('erro', 'Não foi possível carregar o Firebase');
-  }
-}
-
-function iniciarAutenticacaoEDados() {
-  onAuthStateChanged(auth, (usuario) => {
-    if (usuario) {
-      escutarPedidosEmTempoReal();
-    }
-  });
-
-  signInAnonymously(auth).catch((erro) => {
-    const mensagem =
-      'Falha na autenticação. Verifique se o método de login "Anônimo" está ativado em ' +
-      'Authentication > Sign-in method no console do Firebase. Detalhe: ' + erro.message;
-    exibirStatusConexao(mensagem, true);
-    atualizarIndicadorSincronizacao('erro', 'Não conectado (autenticação)');
-  });
-}
-
-function escutarPedidosEmTempoReal() {
-  const consulta = query(colecaoPedidos, orderBy('dataVencimento', 'asc'));
-  onSnapshot(
-    consulta,
-    (snapshot) => {
-      estado.pedidos = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
-      renderizarTudo();
-      ocultarStatusConexao();
-      atualizarIndicadorSincronizacao('ok');
-    },
-    (erro) => {
-      const mensagem =
-        'Erro ao sincronizar dados em tempo real. Verifique se as regras de firestore.rules ' +
-        'foram publicadas no console do Firebase (aba Regras). Detalhe: ' + erro.message;
-      exibirStatusConexao(mensagem, true);
-      atualizarIndicadorSincronizacao('erro', 'Erro de permissão/regras');
-    }
-  );
-}
-
-// Atualiza a "bolinha" de status no cabeçalho: cinza (conectando), verde
-// (sincronizado em tempo real) ou vermelho (erro, com a causa mais provável).
-function atualizarIndicadorSincronizacao(estadoConexao, mensagemErro) {
-  const indicador = document.getElementById('indicadorSincronizacao');
-  const texto = document.getElementById('textoSincronizacao');
-  if (!indicador || !texto) return;
-
-  indicador.classList.remove('ok', 'erro', 'conectando');
-  indicador.classList.add(estadoConexao);
-
-  if (estadoConexao === 'ok') {
-    texto.textContent = 'Sincronizado em tempo real';
-  } else if (estadoConexao === 'erro') {
-    texto.textContent = mensagemErro || 'Erro de sincronização';
-  } else {
-    texto.textContent = 'Conectando...';
-  }
-}
-
-/* =========================================================================
-   6. OPERAÇÕES DE CRUD DOS PEDIDOS
-   ========================================================================= */
-
-async function salvarPedido(dadosFormulario, idExistente) {
-  const dataVencimento = calcularDataVencimento(dadosFormulario.dataRecebimentoEstoque, dadosFormulario.slaDias);
-
-  const dados = {
-    numeroPedido: String(dadosFormulario.numeroPedido).trim(),
-    cliente: String(dadosFormulario.cliente).trim(),
-    dataPedido: dadosFormulario.dataPedido,
-    dataRecebimentoEstoque: dadosFormulario.dataRecebimentoEstoque,
-    slaDias: Number(dadosFormulario.slaDias),
-    dataVencimento,
-    observacao: String(dadosFormulario.observacao || '').trim()
-  };
-
-  if (idExistente) {
-    await updateDoc(doc(db, NOME_COLECAO, idExistente), dados);
-  } else {
-    await addDoc(colecaoPedidos, {
-      ...dados,
-      status: 'aberto',
-      criadoEm: serverTimestamp(),
-      finalizadoEm: null,
-      resultadoSLA: null,
-      diasDiferencaFinalizacao: null,
-      // Status de separação (operacional): todo pedido novo começa "a separar".
-      statusSeparacao: 'a-separar',
-      operadorInicioSeparacao: null,
-      dataHoraInicioSeparacao: null,
-      operadorFimSeparacao: null,
-      dataHoraFimSeparacao: null,
-      // Status de organização (operacional): etapa seguinte à separação
-      // (conferência e organização para despacho), feita por outra pessoa.
-      statusOrganizacao: 'a-organizar',
-      operadorInicioOrganizacao: null,
-      dataHoraInicioOrganizacao: null,
-      operadorFimOrganizacao: null,
-      dataHoraFimOrganizacao: null
-    });
-  }
-}
-
-// Localiza um pedido pelo número (comparação sem diferenciar maiúsculas ou
-// espaços nas pontas), usado pelo painel de Registro de Separação.
-function buscarPedidoPorNumero(numero) {
-  const alvo = String(numero).trim().toLowerCase();
-  return estado.pedidos.find((pedido) => String(pedido.numeroPedido).trim().toLowerCase() === alvo) || null;
-}
-
-async function iniciarSeparacaoPedido(pedido, nomeOperador) {
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    statusSeparacao: 'em-separacao',
-    operadorInicioSeparacao: nomeOperador,
-    dataHoraInicioSeparacao: serverTimestamp()
-  });
-}
-
-async function finalizarSeparacaoPedido(pedido, nomeOperador) {
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    statusSeparacao: 'separado',
-    operadorFimSeparacao: nomeOperador,
-    dataHoraFimSeparacao: serverTimestamp()
-  });
-}
-
-async function iniciarOrganizacaoPedido(pedido, nomeOperador) {
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    statusOrganizacao: 'em-organizacao',
-    operadorInicioOrganizacao: nomeOperador,
-    dataHoraInicioOrganizacao: serverTimestamp()
-  });
-}
-
-// Registra a finalização da organização e, quando a separação já estiver
-// concluída (pré-requisito para a organização ter começado), finaliza o
-// pedido automaticamente - sem precisar do "ticar" manual que existia
-// antes. A lógica de resultado do SLA (calcularResultadoFinalizacao) não
-// muda: continua comparando a data de hoje com o vencimento.
-async function finalizarOrganizacaoPedido(pedido, nomeOperador) {
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    statusOrganizacao: 'organizado',
-    operadorFimOrganizacao: nomeOperador,
-    dataHoraFimOrganizacao: serverTimestamp()
-  });
-
-  if (pedido.statusSeparacao === 'separado' && pedido.status !== 'finalizado') {
-    await finalizarPedido(pedido);
-  }
-}
-
-async function finalizarPedido(pedido) {
-  const hoje = hojeISO();
-  const { resultadoSLA, diasDiferencaFinalizacao } = calcularResultadoFinalizacao(pedido, hoje);
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    status: 'finalizado',
-    finalizadoEm: serverTimestamp(),
-    resultadoSLA,
-    diasDiferencaFinalizacao
-  });
-}
-
-async function reabrirPedido(pedido) {
-  await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
-    status: 'aberto',
-    finalizadoEm: null,
-    resultadoSLA: null,
-    diasDiferencaFinalizacao: null
-  });
-}
-
-async function excluirPedido(id) {
-  await deleteDoc(doc(db, NOME_COLECAO, id));
-}
-
-/* =========================================================================
-   7. RENDERIZAÇÃO DE INTERFACE
-   ========================================================================= */
-
-// Ponto único de atualização: recalcula classificações e redesenha tudo.
-function renderizarTudo() {
-  const pedidosClassificados = estado.pedidos.map((pedido) => ({
-    ...pedido,
-    _classificacao: classificarPedido(pedido)
-  }));
-
-  renderizarDashboard(pedidosClassificados);
-  renderizarPainelConsolidado(pedidosClassificados);
-  renderizarTabelaPedidos(pedidosClassificados);
-  renderizarHistorico();
-  renderizarFaixaAeroporto(pedidosClassificados);
-  renderizarPainelTempos();
-}
-
-function renderizarDashboard(lista) {
-  const abertos = lista.filter((p) => p.status === 'aberto');
-  const noPrazo = abertos.filter((p) => ['verde', 'amarelo'].includes(p._classificacao.chave)).length;
-  const venceHoje = abertos.filter((p) => p._classificacao.chave === 'vence-hoje').length;
-  const atrasados = abertos.filter((p) => ['marrom', 'roxo'].includes(p._classificacao.chave)).length;
-
-  const hoje = hojeISO();
-  const finalizadosHoje = lista.filter(
-    (p) => p.status === 'finalizado' && timestampParaISO(p.finalizadoEm) === hoje
-  ).length;
-
-  const totalPedidos = lista.length;
-  const totalFinalizados = lista.filter((p) => p.status === 'finalizado').length;
-  const taxaConclusao = totalPedidos > 0 ? Math.round((totalFinalizados / totalPedidos) * 100) : 0;
-
-  document.getElementById('indTotalAberto').textContent = abertos.length;
-  document.getElementById('indNoPrazo').textContent = noPrazo;
-  document.getElementById('indVenceHoje').textContent = venceHoje;
-  document.getElementById('indAtrasados').textContent = atrasados;
-  document.getElementById('indFinalizadosHoje').textContent = finalizadosHoje;
-  document.getElementById('indTaxaConclusao').textContent = `${taxaConclusao}%`;
-}
-
-function renderizarPainelConsolidado(lista) {
-  const abertos = lista.filter((p) => p.status === 'aberto');
-  const grupos = new Map();
-
-  abertos.forEach((pedido) => {
-    const classificacao = pedido._classificacao;
-    let chaveGrupo;
-    let label;
-    let ordem;
-
-    let corClasse;
-    if (classificacao.diasRestantes < 0) {
-      // O grupo "atrasados" reúne marrom + roxo; usa a cor mais crítica (roxo).
-      chaveGrupo = 'atrasados';
-      label = 'PEDIDOS ATRASADOS';
-      ordem = -2;
-      corClasse = 'roxo';
-    } else if (classificacao.diasRestantes === 0) {
-      chaveGrupo = 'vence-hoje';
-      label = 'VENCE HOJE';
-      ordem = -1;
-      corClasse = 'vence-hoje';
-    } else {
-      chaveGrupo = `dias-${classificacao.diasRestantes}`;
-      label = `${classificacao.diasRestantes} DIA${classificacao.diasRestantes > 1 ? 'S' : ''}`;
-      ordem = classificacao.diasRestantes;
-      corClasse = classificacao.chave;
-    }
-
-    if (!grupos.has(chaveGrupo)) {
-      grupos.set(chaveGrupo, { label, ordem, corClasse, pedidos: [] });
-    }
-    grupos.get(chaveGrupo).pedidos.push(pedido);
-  });
-
-  const listaGrupos = Array.from(grupos.values()).sort((a, b) => a.ordem - b.ordem);
-  const container = document.getElementById('gruposConsolidados');
-  container.innerHTML = '';
-
-  if (listaGrupos.length === 0) {
-    container.innerHTML = '<p class="mensagem-vazia">Nenhum pedido em aberto no momento.</p>';
-    return;
-  }
-
-  listaGrupos.forEach((grupo) => {
-    const cores = CONFIG_SLA.cores[grupo.corClasse] || {};
-    const botao = document.createElement('button');
-    botao.type = 'button';
-    botao.className = 'grupo-consolidado';
-    botao.style.backgroundColor = cores.bg || '';
-    botao.style.color = cores.texto || '';
-    botao.innerHTML = `<span class="grupo-quantidade">${grupo.pedidos.length}</span><span class="grupo-label">${grupo.label}</span>`;
-    botao.addEventListener('click', () => abrirModalGrupo(grupo.label, grupo.pedidos));
-    container.appendChild(botao);
-  });
-}
-
-function pedidoPassaFiltros(pedido) {
-  const filtros = estado.filtros;
-
-  if (filtros.status && pedido.status !== filtros.status) return false;
-
-  if (filtros.texto) {
-    const alvo = filtros.texto.trim().toLowerCase();
-    const textoPedido = `${pedido.numeroPedido} ${pedido.cliente}`.toLowerCase();
-    if (!textoPedido.includes(alvo)) return false;
-  }
-
-  if (filtros.recebIni && pedido.dataRecebimentoEstoque < filtros.recebIni) return false;
-  if (filtros.recebFim && pedido.dataRecebimentoEstoque > filtros.recebFim) return false;
-  if (filtros.vencIni && pedido.dataVencimento < filtros.vencIni) return false;
-  if (filtros.vencFim && pedido.dataVencimento > filtros.vencFim) return false;
-
-  return true;
-}
-
-function renderizarTabelaPedidos(lista) {
-  const filtrados = lista.filter(pedidoPassaFiltros);
-
-  filtrados.sort((a, b) => {
-    const ordemA = ordemCriticidade(a._classificacao);
-    const ordemB = ordemCriticidade(b._classificacao);
-    if (ordemA !== ordemB) return ordemA - ordemB;
-    const diasA = a._classificacao.diasRestantes ?? 0;
-    const diasB = b._classificacao.diasRestantes ?? 0;
-    return diasA - diasB;
-  });
-
-  // Mantém as duas representações (tabela e cartões) sempre atualizadas;
-  // qual delas fica visível é decidido puramente pelo CSS, conforme o
-  // "modo celular" (ver seção 10 e o atributo data-visualizacao).
-  const corpo = document.getElementById('corpoTabelaPedidos');
-  corpo.innerHTML = '';
-  filtrados.forEach((pedido) => corpo.appendChild(criarLinhaPedido(pedido)));
-
-  const containerCards = document.getElementById('listaCardsPedidos');
-  containerCards.innerHTML = '';
-  filtrados.forEach((pedido) => containerCards.appendChild(criarCardPedido(pedido)));
-
-  document.getElementById('contadorListaPedidos').textContent = `(${filtrados.length})`;
-  document.getElementById('mensagemListaVazia').hidden = filtrados.length > 0;
-}
-
-// Cria o <span> de badge de situação, reaproveitado pela tabela e pelo cartão.
-function criarBadgeSituacao(pedido, classificacao) {
-  const badge = document.createElement('span');
-  badge.className = 'badge';
-  badge.style.backgroundColor = classificacao.bg;
-  badge.style.color = classificacao.texto;
-  badge.title = classificacao.label;
-  badge.textContent = textoSituacao(pedido, classificacao);
-  return badge;
-}
-
-// Cria o indicador de Status de Separação (bolinha colorida + rótulo),
-// reaproveitado pela tabela e pelo cartão. Independente da Situação (SLA).
-function criarBadgeStatusSeparacao(pedido) {
-  const chave = pedido.statusSeparacao || 'a-separar';
-  const info = CONFIG_SEPARACAO[chave] || CONFIG_SEPARACAO['a-separar'];
-
-  const span = document.createElement('span');
-  span.className = 'status-separacao';
-  span.title = info.label;
-
-  const bolinha = document.createElement('span');
-  bolinha.className = 'status-separacao-bolinha';
-  bolinha.style.backgroundColor = info.cor;
-  span.appendChild(bolinha);
-
-  span.appendChild(document.createTextNode(info.label));
-  return span;
-}
-
-// Nome do operador a exibir: quem iniciou (enquanto em separação) ou quem
-// finalizou (quando já separado). Vazio enquanto o pedido ainda não foi
-// atribuído a ninguém ("a separar").
-function obterOperadorAtual(pedido) {
-  if (pedido.statusSeparacao === 'separado') return pedido.operadorFimSeparacao || '-';
-  if (pedido.statusSeparacao === 'em-separacao') return pedido.operadorInicioSeparacao || '-';
-  return '-';
-}
-
-// Cria o indicador de Status de Organização (bolinha colorida + rótulo),
-// reaproveitado pela tabela e pelo cartão. Independente da Situação (SLA) e
-// do Status de Separação acima; mesma estrutura visual, a partir de
-// CONFIG_ORGANIZACAO.
-function criarBadgeStatusOrganizacao(pedido) {
-  const chave = pedido.statusOrganizacao || 'a-organizar';
-  const info = CONFIG_ORGANIZACAO[chave] || CONFIG_ORGANIZACAO['a-organizar'];
-
-  const span = document.createElement('span');
-  span.className = 'status-separacao';
-  span.title = info.label;
-
-  const bolinha = document.createElement('span');
-  bolinha.className = 'status-separacao-bolinha';
-  bolinha.style.backgroundColor = info.cor;
-  span.appendChild(bolinha);
-
-  span.appendChild(document.createTextNode(info.label));
-  return span;
-}
-
-// Nome do operador de organização a exibir: mesmo critério de
-// obterOperadorAtual, aplicado à etapa de organização.
-function obterOperadorOrganizacaoAtual(pedido) {
-  if (pedido.statusOrganizacao === 'organizado') return pedido.operadorFimOrganizacao || '-';
-  if (pedido.statusOrganizacao === 'em-organizacao') return pedido.operadorInicioOrganizacao || '-';
-  return '-';
-}
-
-// Cria os botões Editar/Excluir (e Reabrir, quando finalizado) dentro de um
-// container, reaproveitado pela tabela e pelo cartão. A finalização deixou
-// de ser manual (ver finalizarOrganizacaoPedido); "Reabrir" é a forma de
-// corrigir um pedido finalizado por engano, devolvendo-o para "aberto" sem
-// alterar os registros de separação/organização já feitos.
-function criarBotoesAcoes(pedido, container) {
-  const btnEditar = document.createElement('button');
-  btnEditar.type = 'button';
-  btnEditar.className = 'btn btn-link';
-  btnEditar.textContent = 'Editar';
-  btnEditar.disabled = pedido.status === 'finalizado';
-  btnEditar.title = pedido.status === 'finalizado' ? 'Pedidos finalizados não podem ser editados' : 'Editar pedido';
-  btnEditar.addEventListener('click', () => abrirModalEdicaoPedido(pedido));
-  container.appendChild(btnEditar);
-
-  if (pedido.status === 'finalizado') {
-    const btnReabrir = document.createElement('button');
-    btnReabrir.type = 'button';
-    btnReabrir.className = 'btn btn-link';
-    btnReabrir.textContent = 'Reabrir';
-    btnReabrir.title = 'Reabrir pedido (volta para "aberto"; não altera os registros de separação/organização já feitos)';
-    btnReabrir.addEventListener('click', () => {
-      if (confirm(`Confirma reabrir o pedido ${pedido.numeroPedido}? Ele voltará para "aberto".`)) {
-        reabrirPedido(pedido).catch((erro) => alert('Erro ao reabrir pedido: ' + erro.message));
-      }
-    });
-    container.appendChild(btnReabrir);
-  }
-
-  const btnExcluir = document.createElement('button');
-  btnExcluir.type = 'button';
-  btnExcluir.className = 'btn btn-link btn-link-perigo';
-  btnExcluir.textContent = 'Excluir';
-  btnExcluir.addEventListener('click', () => {
-    if (confirm(`Confirma a exclusão do pedido ${pedido.numeroPedido}? Esta ação não pode ser desfeita.`)) {
-      excluirPedido(pedido.id).catch((erro) => alert('Erro ao excluir pedido: ' + erro.message));
-    }
-  });
-  container.appendChild(btnExcluir);
-}
-
-function criarLinhaPedido(pedido) {
-  const classificacao = pedido._classificacao;
-  const tr = document.createElement('tr');
-  tr.title =
-    `Criado em: ${formatarDataHoraBR(pedido.criadoEm)}` +
-    (pedido.finalizadoEm ? ` • Finalizado em: ${formatarDataHoraBR(pedido.finalizadoEm)}` : '') +
-    (pedido.dataHoraInicioSeparacao
-      ? ` • Separação iniciada por ${pedido.operadorInicioSeparacao} em ${formatarDataHoraBrasilia(pedido.dataHoraInicioSeparacao)} (horário de Brasília)`
-      : '') +
-    (pedido.dataHoraFimSeparacao
-      ? ` • Separação finalizada por ${pedido.operadorFimSeparacao} em ${formatarDataHoraBrasilia(pedido.dataHoraFimSeparacao)} (horário de Brasília)`
-      : '') +
-    (pedido.dataHoraInicioOrganizacao
-      ? ` • Organização iniciada por ${pedido.operadorInicioOrganizacao} em ${formatarDataHoraBrasilia(pedido.dataHoraInicioOrganizacao)} (horário de Brasília)`
-      : '') +
-    (pedido.dataHoraFimOrganizacao
-      ? ` • Organização finalizada por ${pedido.operadorFimOrganizacao} em ${formatarDataHoraBrasilia(pedido.dataHoraFimOrganizacao)} (horário de Brasília)`
-      : '');
-
-  const celulas = [
-    pedido.numeroPedido,
-    pedido.cliente,
-    formatarBR(pedido.dataPedido),
-    formatarBR(pedido.dataRecebimentoEstoque),
-    pedido.slaDias,
-    formatarBR(pedido.dataVencimento)
-  ];
-  celulas.forEach((valor) => {
-    const td = document.createElement('td');
-    td.textContent = valor;
-    tr.appendChild(td);
-  });
-
-  const tdSituacao = document.createElement('td');
-  tdSituacao.appendChild(criarBadgeSituacao(pedido, classificacao));
-  tr.appendChild(tdSituacao);
-
-  const tdStatus = document.createElement('td');
-  tdStatus.appendChild(criarBadgeStatusSeparacao(pedido));
-  tr.appendChild(tdStatus);
-
-  const tdOperador = document.createElement('td');
-  tdOperador.className = 'col-operador';
-  tdOperador.textContent = obterOperadorAtual(pedido);
-  tr.appendChild(tdOperador);
-
-  const tdObs = document.createElement('td');
-  tdObs.textContent = pedido.observacao || '-';
-  tdObs.className = 'col-observacao';
-  tr.appendChild(tdObs);
-
-  const tdOrganizacao = document.createElement('td');
-  tdOrganizacao.appendChild(criarBadgeStatusOrganizacao(pedido));
-  tr.appendChild(tdOrganizacao);
-
-  const tdAcoes = document.createElement('td');
-  tdAcoes.className = 'col-acoes';
-  criarBotoesAcoes(pedido, tdAcoes);
-  tr.appendChild(tdAcoes);
-
-  return tr;
-}
-
-// Versão em cartão da mesma linha de pedido, usada no "modo celular".
-function criarCardPedido(pedido) {
-  const classificacao = pedido._classificacao;
-  const card = document.createElement('div');
-  card.className = 'card-pedido';
-  card.title =
-    `Criado em: ${formatarDataHoraBR(pedido.criadoEm)}` +
-    (pedido.finalizadoEm ? ` • Finalizado em: ${formatarDataHoraBR(pedido.finalizadoEm)}` : '');
-
-  const topo = document.createElement('div');
-  topo.className = 'card-pedido-topo';
-  const numero = document.createElement('span');
-  numero.textContent = `Nº ${pedido.numeroPedido}`;
-  topo.appendChild(numero);
-  topo.appendChild(criarBadgeSituacao(pedido, classificacao));
-  card.appendChild(topo);
-
-  const cliente = document.createElement('div');
-  cliente.className = 'card-pedido-cliente';
-  cliente.textContent = pedido.cliente;
-  card.appendChild(cliente);
-
-  const linhaStatusSeparacao = document.createElement('div');
-  linhaStatusSeparacao.className = 'card-pedido-status-separacao';
-  linhaStatusSeparacao.appendChild(criarBadgeStatusSeparacao(pedido));
-  const nomeOperador = obterOperadorAtual(pedido);
-  if (nomeOperador !== '-') {
-    const operadorSpan = document.createElement('span');
-    operadorSpan.className = 'card-pedido-operador';
-    operadorSpan.textContent = nomeOperador;
-    linhaStatusSeparacao.appendChild(operadorSpan);
-  }
-  card.appendChild(linhaStatusSeparacao);
-
-  const linhaStatusOrganizacao = document.createElement('div');
-  linhaStatusOrganizacao.className = 'card-pedido-status-separacao';
-  linhaStatusOrganizacao.appendChild(criarBadgeStatusOrganizacao(pedido));
-  const nomeOperadorOrganizacao = obterOperadorOrganizacaoAtual(pedido);
-  if (nomeOperadorOrganizacao !== '-') {
-    const operadorOrgSpan = document.createElement('span');
-    operadorOrgSpan.className = 'card-pedido-operador';
-    operadorOrgSpan.textContent = nomeOperadorOrganizacao;
-    linhaStatusOrganizacao.appendChild(operadorOrgSpan);
-  }
-  card.appendChild(linhaStatusOrganizacao);
-
-  const grid = document.createElement('div');
-  grid.className = 'card-pedido-grid';
-  grid.innerHTML = `
-    <span>Pedido: ${formatarBR(pedido.dataPedido)}</span>
-    <span>Recebimento: ${formatarBR(pedido.dataRecebimentoEstoque)}</span>
-    <span>SLA: ${pedido.slaDias} dias úteis</span>
-    <span>Vencimento: ${formatarBR(pedido.dataVencimento)}</span>
-  `;
-  card.appendChild(grid);
-
-  if (pedido.observacao) {
-    const obs = document.createElement('div');
-    obs.className = 'card-pedido-obs';
-    obs.textContent = pedido.observacao;
-    card.appendChild(obs);
-  }
-
-  const rodape = document.createElement('div');
-  rodape.className = 'card-pedido-rodape';
-
-  const acoes = document.createElement('div');
-  acoes.className = 'card-pedido-acoes';
-  criarBotoesAcoes(pedido, acoes);
-  rodape.appendChild(acoes);
-
-  card.appendChild(rodape);
-
-  return card;
-}
-
-/* -------------------------------------------------------------------------
-   Histórico operacional + gráfico de barras empilhadas em SVG puro
-   ------------------------------------------------------------------------- */
-
-// Retorna a data (yyyy-mm-dd) usada para agrupar um pedido, conforme o
-// tipo de agrupamento selecionado.
-function obterDataBucket(pedido, tipoAgrupamento) {
-  if (tipoAgrupamento === 'vencimento') return pedido.dataVencimento || null;
-  if (tipoAgrupamento === 'finalizacao') return timestampParaISO(pedido.finalizadoEm);
-  return pedido.dataRecebimentoEstoque || null; // padrão: recebimento
-}
-
-/**
- * Calcula o histórico dos últimos N dias para o agrupamento selecionado.
- * Cada linha representa uma data e agrega os pedidos cujo campo de data
- * correspondente ao agrupamento caia naquele dia:
- *   - recebidos: total de pedidos do grupo (volume do dia)
- *   - finalizados: quantos, dentro do grupo, já estão concluídos
- *   - pendentes: quantos, dentro do grupo, ainda estão em aberto
- *   - atrasados: dentre os pendentes, quantos estão atualmente atrasados
- *   - percentualConclusao: finalizados / total do grupo
- */
-function calcularHistorico(tipoAgrupamento, diasJanela = 14) {
-  const hoje = parseDataLocal(hojeISO());
-  const datasJanela = [];
-  for (let i = diasJanela - 1; i >= 0; i--) {
-    const data = new Date(hoje);
-    data.setDate(data.getDate() - i);
-    datasJanela.push(formatarISO(data));
-  }
-
-  return datasJanela.map((data) => {
-    const grupo = estado.pedidos.filter((pedido) => obterDataBucket(pedido, tipoAgrupamento) === data);
-    const finalizados = grupo.filter((pedido) => pedido.status === 'finalizado').length;
-    const pendentes = grupo.filter((pedido) => pedido.status === 'aberto').length;
-    const atrasados = grupo.filter(
-      (pedido) => pedido.status === 'aberto' && diferencaEmDiasUteis(hojeISO(), pedido.dataVencimento) < 0
-    ).length;
-    const total = grupo.length;
-    const percentualConclusao = total > 0 ? Math.round((finalizados / total) * 100) : 0;
-
-    return { data, recebidos: total, finalizados, pendentes, atrasados, percentualConclusao };
-  });
-}
-
-function renderizarHistorico() {
-  const dados = calcularHistorico(estado.agrupamentoHistorico, 14);
-
-  const corpo = document.getElementById('corpoTabelaHistorico');
-  corpo.innerHTML = '';
-  dados.forEach((linha) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${formatarBR(linha.data)}</td>
-      <td>${linha.recebidos}</td>
-      <td>${linha.finalizados}</td>
-      <td>${linha.pendentes}</td>
-      <td>${linha.atrasados}</td>
-      <td>${linha.percentualConclusao}%</td>
-    `;
-    corpo.appendChild(tr);
-  });
-
-  renderizarGraficoSvg(dados);
-}
-
-// Lê o valor atual de uma variável CSS (para o gráfico acompanhar o tema).
-function obterCorCss(nomeVariavel) {
-  const valor = getComputedStyle(document.documentElement).getPropertyValue(nomeVariavel);
-  return valor ? valor.trim() : '#999999';
-}
-
-function renderizarGraficoSvg(dados) {
-  const container = document.getElementById('graficoHistoricoSvgContainer');
-  container.innerHTML = '';
-
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const larguraBarra = 22;
-  const alturaTotal = 240;
-  const margemInferior = 34;
-  const margemSuperior = 10;
-  const alturaUtil = alturaTotal - margemInferior - margemSuperior;
-  const larguraTotal = Math.max(620, dados.length * 44);
-  const espacamento = (larguraTotal - dados.length * larguraBarra) / (dados.length + 1);
-
-  const maiorTotal = Math.max(1, ...dados.map((linha) => linha.recebidos));
-
-  const corFinalizado = obterCorCss('--cor-grafico-finalizado');
-  const corPendente = obterCorCss('--cor-grafico-pendente');
-  const corAtrasado = obterCorCss('--cor-grafico-atrasado');
-
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${larguraTotal} ${alturaTotal}`);
-  svg.setAttribute('width', '100%');
-  svg.setAttribute('height', alturaTotal);
-  svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
-
-  dados.forEach((linha, indice) => {
-    const pendentesNoPrazo = Math.max(0, linha.pendentes - linha.atrasados);
-    const segmentos = [
-      { valor: linha.finalizados, cor: corFinalizado, rotulo: 'Finalizados' },
-      { valor: pendentesNoPrazo, cor: corPendente, rotulo: 'Pendentes' },
-      { valor: linha.atrasados, cor: corAtrasado, rotulo: 'Atrasados' }
-    ];
-
-    const x = espacamento + indice * (larguraBarra + espacamento);
-    let yAcumulado = alturaTotal - margemInferior;
-
-    segmentos.forEach((segmento) => {
-      const alturaSegmento = (segmento.valor / maiorTotal) * alturaUtil;
-      if (alturaSegmento > 0) {
-        const rect = document.createElementNS(svgNS, 'rect');
-        rect.setAttribute('x', x);
-        rect.setAttribute('y', yAcumulado - alturaSegmento);
-        rect.setAttribute('width', larguraBarra);
-        rect.setAttribute('height', alturaSegmento);
-        rect.setAttribute('fill', segmento.cor);
-        rect.setAttribute('rx', '2');
-        const titulo = document.createElementNS(svgNS, 'title');
-        titulo.textContent = `${formatarBR(linha.data)} · ${segmento.rotulo}: ${segmento.valor}`;
-        rect.appendChild(titulo);
-        svg.appendChild(rect);
-      }
-      yAcumulado -= alturaSegmento;
-    });
-
-    const rotuloEixo = document.createElementNS(svgNS, 'text');
-    rotuloEixo.setAttribute('x', x + larguraBarra / 2);
-    rotuloEixo.setAttribute('y', alturaTotal - margemInferior + 16);
-    rotuloEixo.setAttribute('text-anchor', 'middle');
-    rotuloEixo.setAttribute('class', 'grafico-rotulo-eixo');
-    rotuloEixo.textContent = formatarBR(linha.data).slice(0, 5);
-    svg.appendChild(rotuloEixo);
-  });
-
-  container.appendChild(svg);
-
-  const legenda = document.createElement('div');
-  legenda.className = 'grafico-legenda';
-  legenda.innerHTML = `
-    <span><i class="legenda-cor" style="background:${corFinalizado}"></i>Finalizados</span>
-    <span><i class="legenda-cor" style="background:${corPendente}"></i>Pendentes</span>
-    <span><i class="legenda-cor" style="background:${corAtrasado}"></i>Atrasados</span>
-  `;
-  container.appendChild(legenda);
-}
-
-/* -------------------------------------------------------------------------
-   Faixa fixa estilo painel de aeroporto
-   ------------------------------------------------------------------------- */
-function renderizarFaixaAeroporto(lista) {
-  const abertos = lista.filter((pedido) => pedido.status === 'aberto');
-  const atrasados = abertos.filter((pedido) => ['marrom', 'roxo'].includes(pedido._classificacao.chave)).length;
-  const venceHoje = abertos.filter((pedido) => pedido._classificacao.chave === 'vence-hoje').length;
-
-  const contagemPorDia = {};
-  abertos.forEach((pedido) => {
-    const dias = pedido._classificacao.diasRestantes;
-    if (dias > 0) {
-      contagemPorDia[dias] = (contagemPorDia[dias] || 0) + 1;
-    }
-  });
-
-  const partes = [];
-  partes.push(`${atrasados} PEDIDO${atrasados !== 1 ? 'S' : ''} ATRASADO${atrasados !== 1 ? 'S' : ''}`);
-  partes.push(`${venceHoje} VENCE${venceHoje !== 1 ? 'M' : ''} HOJE`);
-
-  Object.keys(contagemPorDia)
-    .map(Number)
-    .sort((a, b) => a - b)
-    .forEach((dias) => {
-      const quantidade = contagemPorDia[dias];
-      partes.push(`${quantidade} VENCE${quantidade !== 1 ? 'M' : ''} EM ${dias} DIA${dias > 1 ? 'S' : ''}`);
-    });
-
-  const texto = partes.join('   |   ');
-
-  montarTrilhoFaixaAeroporto(texto);
-
-  // Cor geral do rodapé: azul enquanto houver pedidos em aberto (fila com
-  // trabalho pendente), verde quando não houver nenhum pedido em aberto.
-  const rodape = document.getElementById('faixaAeroporto');
-  if (rodape) {
-    rodape.classList.remove('pendencias', 'verde');
-    rodape.classList.add(abertos.length > 0 ? 'pendencias' : 'verde');
-  }
-}
-
-// Preenche a faixa de rolagem com UMA única cópia do texto por vez: ela
-// entra pela borda direita da tela, atravessa e sai pela esquerda, com um
-// intervalo vazio até reaparecer - como um letreiro tradicional de painel
-// de aeroporto (sem várias cópias repetidas lado a lado). A velocidade é
-// fixada em pixels por segundo, então a rolagem sempre parece igualmente
-// rápida, independentemente do tamanho do texto.
-const VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO = 80;
-
-function montarTrilhoFaixaAeroporto(texto) {
-  const trilho = document.getElementById('trilhoFaixaAeroporto');
-  const rodape = document.getElementById('faixaAeroporto');
-  if (!trilho || !rodape) return;
-
-  trilho.innerHTML = '';
-  const bloco = document.createElement('div');
-  bloco.className = 'faixa-aeroporto-conteudo';
-  bloco.textContent = texto;
-  trilho.appendChild(bloco);
-
-  const larguraJanela = rodape.clientWidth || window.innerWidth || 1200;
-  const larguraTexto = bloco.offsetWidth;
-
-  // Posição inicial: totalmente fora da tela, à direita (a uma distância
-  // igual à largura da própria tela). Posição final: totalmente fora da
-  // tela, à esquerda (recuada pela largura do próprio texto).
-  trilho.style.setProperty('--x-inicial-faixa-aeroporto', `${larguraJanela}px`);
-  trilho.style.setProperty('--x-final-faixa-aeroporto', `${-larguraTexto}px`);
-
-  const distanciaTotalPercorrida = larguraJanela + larguraTexto;
-  const duracaoSegundos = Math.max(8, distanciaTotalPercorrida / VELOCIDADE_ROLAGEM_PX_POR_SEGUNDO);
-  trilho.style.setProperty('--duracao-faixa-aeroporto', `${duracaoSegundos}s`);
-}
-
-/* -------------------------------------------------------------------------
-   Painel de Tempos: métricas de separação e organização
-   -------------------------------------------------------------------------
-   Tudo calculado no cliente a partir de estado.pedidos (a mesma coleção do
-   Firestore já usada pelo resto do app) - não é necessário nenhum banco ou
-   coleção adicional. "Concluída" aqui significa pedido com as duas etapas
-   completas (statusSeparacao = 'separado' e statusOrganizacao =
-   'organizado'), o que hoje corresponde exatamente a pedido.status ===
-   'finalizado', já que a finalização passou a ser automática.
-   ------------------------------------------------------------------------- */
-
-// Converte um Timestamp do Firebase (ou Date/ISO) em milissegundos (epoch), ou null.
-function timestampParaMs(timestamp) {
-  if (!timestamp) return null;
-  const data = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-  return data.getTime();
-}
-
-// Formata uma duração em milissegundos como "Xh Ymin" (ou só "Ymin" se < 1h).
-function formatarDuracao(ms) {
-  if (ms == null || Number.isNaN(ms) || ms < 0) return '-';
-  const totalMinutos = Math.round(ms / 60000);
-  if (totalMinutos < 1) return '< 1min';
-  const horas = Math.floor(totalMinutos / 60);
-  const minutos = totalMinutos % 60;
-  return horas > 0 ? `${horas}h ${minutos}min` : `${minutos}min`;
-}
-
-// Duração (ms) da etapa de separação de um pedido, ou null se incompleta.
-function duracaoSeparacaoMs(pedido) {
-  const inicio = timestampParaMs(pedido.dataHoraInicioSeparacao);
-  const fim = timestampParaMs(pedido.dataHoraFimSeparacao);
-  return inicio == null || fim == null ? null : fim - inicio;
-}
-
-// Duração (ms) da etapa de organização de um pedido, ou null se incompleta.
-function duracaoOrganizacaoMs(pedido) {
-  const inicio = timestampParaMs(pedido.dataHoraInicioOrganizacao);
-  const fim = timestampParaMs(pedido.dataHoraFimOrganizacao);
-  return inicio == null || fim == null ? null : fim - inicio;
-}
-
-// Duração total (ms) = separação + organização, ou null se qualquer uma das
-// duas etapas ainda não estiver completa.
-function duracaoTotalMs(pedido) {
-  const separacao = duracaoSeparacaoMs(pedido);
-  const organizacao = duracaoOrganizacaoMs(pedido);
-  return separacao == null || organizacao == null ? null : separacao + organizacao;
-}
-
-/**
- * Agrupa, por operador, o tempo médio de uma etapa (separação ou
- * organização) e o percentual de participação no volume total de pedidos
- * com aquela etapa concluída. O tempo é atribuído a quem REGISTROU O FIM da
- * etapa (operadorFimSeparacao / operadorFimOrganizacao) - premissa adotada
- * porque, na prática, o mesmo operador normalmente inicia e finaliza a
- * própria etapa de um pedido.
- */
-function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao) {
-  const registros = lista
-    .map((pedido) => ({ operador: pedido[campoOperadorFim], duracao: funcaoDuracao(pedido) }))
-    .filter((registro) => registro.operador && registro.duracao != null);
-
-  const totalRegistros = registros.length;
-  const porOperador = new Map();
-  registros.forEach(({ operador, duracao }) => {
-    if (!porOperador.has(operador)) porOperador.set(operador, { somaMs: 0, contagem: 0 });
-    const acumulado = porOperador.get(operador);
-    acumulado.somaMs += duracao;
-    acumulado.contagem += 1;
-  });
-
-  return Array.from(porOperador.entries())
-    .map(([operador, { somaMs, contagem }]) => ({
-      operador,
-      tempoMedioMs: somaMs / contagem,
-      quantidade: contagem,
-      percentual: totalRegistros > 0 ? Math.round((contagem / totalRegistros) * 100) : 0
-    }))
-    .sort((a, b) => b.quantidade - a.quantidade);
-}
-
-function renderizarListaTemposOperador(idLista, idMensagemVazia, dados) {
-  const lista = document.getElementById(idLista);
-  const mensagemVazia = document.getElementById(idMensagemVazia);
-  if (!lista) return;
-  lista.innerHTML = '';
-
-  if (dados.length === 0) {
-    if (mensagemVazia) mensagemVazia.hidden = false;
-    return;
-  }
-  if (mensagemVazia) mensagemVazia.hidden = true;
-
-  dados.forEach((item) => {
-    const li = document.createElement('li');
-    li.innerHTML = `
-      <span class="tempo-operador-nome">${item.operador}</span>
-      <span class="tempo-operador-metricas">
-        <span>${formatarDuracao(item.tempoMedioMs)}</span>
-        <span>${item.percentual}%</span>
-      </span>
-    `;
-    lista.appendChild(li);
-  });
-}
-
-/**
- * Calcula o histórico diário de tempos (últimos N dias, agrupado pela Data
- * do Pedido - o mesmo critério usado em "Dias registrados" no indicador
- * geral). Para cada dia:
- *   - total: pedidos lançados naquele dia
- *   - concluidas: quantos, dentre esses, já foram finalizados (separação +
- *     organização completas)
- *   - pendentes: total - concluidas
- *   - status: selo resumindo o andamento do dia (Concluído / Em andamento /
- *     Pendente / "-" quando não há pedidos naquele dia)
- *   - tempoMedioMs: tempo médio total (separação + organização) dos
- *     pedidos concluídos daquele dia
- *   - percentualEfetuado: concluidas ÷ total do dia
- */
-function calcularHistoricoTempos(diasJanela = 14) {
-  const hoje = parseDataLocal(hojeISO());
-  const datasJanela = [];
-  for (let i = diasJanela - 1; i >= 0; i--) {
-    const data = new Date(hoje);
-    data.setDate(data.getDate() - i);
-    datasJanela.push(formatarISO(data));
-  }
-
-  return datasJanela.map((data) => {
-    const grupo = estado.pedidos.filter((pedido) => pedido.dataPedido === data);
-    const total = grupo.length;
-    const concluidos = grupo.filter((pedido) => pedido.status === 'finalizado');
-    const concluidas = concluidos.length;
-    const pendentes = total - concluidas;
-
-    let status;
-    if (total === 0) status = '-';
-    else if (pendentes === 0) status = 'Concluído';
-    else if (concluidas > 0) status = 'Em andamento';
-    else status = 'Pendente';
-
-    const duracoes = concluidos.map(duracaoTotalMs).filter((valor) => valor != null);
-    const tempoMedioMs = duracoes.length > 0 ? duracoes.reduce((soma, valor) => soma + valor, 0) / duracoes.length : null;
-    const percentualEfetuado = total > 0 ? Math.round((concluidas / total) * 100) : null;
-
-    return { data, total, pendentes, status, concluidas, tempoMedioMs, percentualEfetuado };
-  });
-}
-
-function renderizarPainelTempos() {
-  const elTotal = document.getElementById('tempoIndTotal');
-  if (!elTotal) return; // painel ainda não presente no DOM (defensivo)
-
-  const total = estado.pedidos.length;
-  const concluidas = estado.pedidos.filter((pedido) => pedido.status === 'finalizado').length;
-  const pendentes = total - concluidas;
-  const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
-  const diasRegistrados = new Set(estado.pedidos.map((pedido) => pedido.dataPedido).filter(Boolean)).size;
-
-  elTotal.textContent = total;
-  document.getElementById('tempoIndPendentes').textContent = pendentes;
-  document.getElementById('tempoIndConcluidas').textContent = concluidas;
-  document.getElementById('tempoIndDiasRegistrados').textContent = diasRegistrados;
-  document.getElementById('tempoIndTaxaConclusao').textContent = `${taxaConclusao}%`;
-
-  const temposSeparacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimSeparacao', duracaoSeparacaoMs);
-  const temposOrganizacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimOrganizacao', duracaoOrganizacaoMs);
-  renderizarListaTemposOperador('listaTemposSeparacao', 'mensagemVaziaTemposSeparacao', temposSeparacao);
-  renderizarListaTemposOperador('listaTemposOrganizacao', 'mensagemVaziaTemposOrganizacao', temposOrganizacao);
-
-  const historico = calcularHistoricoTempos(14);
-  const corpo = document.getElementById('corpoTabelaHistoricoTempos');
-  corpo.innerHTML = '';
-  historico.forEach((linha) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${formatarBR(linha.data)}</td>
-      <td>${linha.total}</td>
-      <td>${linha.pendentes}</td>
-      <td>${linha.status}</td>
-      <td>${linha.concluidas}</td>
-      <td>${linha.tempoMedioMs != null ? formatarDuracao(linha.tempoMedioMs) : '-'}</td>
-      <td>${linha.percentualEfetuado != null ? linha.percentualEfetuado + '%' : '-'}</td>
-    `;
-    corpo.appendChild(tr);
-  });
-}
-
-/* =========================================================================
-   8. MODAIS
-   ========================================================================= */
-
-// Abre o modal exclusivamente para EDITAR um pedido existente. A criação de
-// novos pedidos é feita pelo formulário inline em "Adicionar Novo Pedido"
-// (ver função configurarFormularioInlineNovoPedido), sem modal.
-function abrirModalEdicaoPedido(pedido) {
-  const form = document.getElementById('formPedido');
-  form.reset();
-  document.getElementById('erroFormPedido').hidden = true;
-
-  document.getElementById('campoPedidoId').value = pedido.id;
-  document.getElementById('campoNumeroPedido').value = pedido.numeroPedido;
-  document.getElementById('campoCliente').value = pedido.cliente;
-  document.getElementById('campoDataPedido').value = pedido.dataPedido;
-  document.getElementById('campoDataRecebimento').value = pedido.dataRecebimentoEstoque;
-  document.getElementById('campoSlaDias').value = pedido.slaDias;
-  document.getElementById('campoObservacao').value = pedido.observacao || '';
-
-  atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento');
-  document.getElementById('modalPedido').hidden = false;
-  document.getElementById('campoNumeroPedido').focus();
-}
-
-function fecharModalPedido() {
-  document.getElementById('modalPedido').hidden = true;
-}
-
-// Atualiza o texto de preview do vencimento calculado. Recebe os IDs dos
-// campos porque é reaproveitada tanto pelo modal de edição quanto pelo
-// formulário inline de criação de pedidos.
-function atualizarPreviewVencimento(idCampoRecebimento, idCampoSla, idPreview) {
-  const recebimento = document.getElementById(idCampoRecebimento).value;
-  const sla = Number(document.getElementById(idCampoSla).value);
-  const preview = document.getElementById(idPreview);
-  if (recebimento && sla > 0) {
-    preview.textContent = formatarBR(calcularDataVencimento(recebimento, sla));
-  } else {
-    preview.textContent = '–';
-  }
-}
-
-function abrirModalGrupo(titulo, pedidos) {
-  document.getElementById('modalGrupoTitulo').textContent = titulo;
-  const lista = document.getElementById('listaModalGrupo');
-  lista.innerHTML = '';
-
-  pedidos
-    .slice()
-    .sort((a, b) => (a._classificacao.diasRestantes ?? 0) - (b._classificacao.diasRestantes ?? 0))
-    .forEach((pedido) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<strong>${pedido.numeroPedido}</strong> — ${pedido.cliente}
-        <span class="lista-modal-venc">Vencimento: ${formatarBR(pedido.dataVencimento)}</span>`;
-      lista.appendChild(li);
-    });
-
-  document.getElementById('modalGrupo').hidden = false;
-}
-
-function fecharModalGrupo() {
-  document.getElementById('modalGrupo').hidden = true;
-}
-
-/* =========================================================================
-   9. FILTROS, BUSCA E EVENTOS DE INTERFACE
-   ========================================================================= */
-
-function configurarModais() {
-  document.getElementById('btnFecharModalPedido').addEventListener('click', fecharModalPedido);
-  document.getElementById('btnCancelarPedido').addEventListener('click', fecharModalPedido);
-  document.getElementById('modalPedido').addEventListener('click', (evento) => {
-    if (evento.target.id === 'modalPedido') fecharModalPedido();
-  });
-
-  document.getElementById('btnFecharModalGrupo').addEventListener('click', fecharModalGrupo);
-  document.getElementById('modalGrupo').addEventListener('click', (evento) => {
-    if (evento.target.id === 'modalGrupo') fecharModalGrupo();
-  });
-
-  document.getElementById('campoDataRecebimento').addEventListener('input', () =>
-    atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento')
-  );
-  document.getElementById('campoSlaDias').addEventListener('input', () =>
-    atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento')
-  );
-
-  // Formulário do modal: usado exclusivamente para EDITAR um pedido existente.
-  document.getElementById('formPedido').addEventListener('submit', async (evento) => {
-    evento.preventDefault();
-    const erro = document.getElementById('erroFormPedido');
-    erro.hidden = true;
-
-    const dados = {
-      numeroPedido: document.getElementById('campoNumeroPedido').value,
-      cliente: document.getElementById('campoCliente').value,
-      dataPedido: document.getElementById('campoDataPedido').value,
-      dataRecebimentoEstoque: document.getElementById('campoDataRecebimento').value,
-      slaDias: document.getElementById('campoSlaDias').value,
-      observacao: document.getElementById('campoObservacao').value
-    };
-
-    const invalido =
-      !dados.numeroPedido.trim() ||
-      !dados.cliente.trim() ||
-      !dados.dataPedido ||
-      !dados.dataRecebimentoEstoque ||
-      !dados.slaDias ||
-      Number(dados.slaDias) <= 0;
-
-    if (invalido) {
-      erro.textContent = 'Preencha todos os campos obrigatórios (marcados com *) com valores válidos.';
-      erro.hidden = false;
-      return;
-    }
-
-    const idExistente = document.getElementById('campoPedidoId').value || null;
-
-    try {
-      await salvarPedido(dados, idExistente);
-      fecharModalPedido();
-    } catch (erroSalvar) {
-      erro.textContent = 'Erro ao salvar pedido: ' + erroSalvar.message;
-      erro.hidden = false;
-    }
-  });
-}
-
-/**
- * Alterna entre as três telas do app: "Painel Operacional" (tela inicial:
- * Painel Consolidado por Prazo, busca e Adicionar Pedido), "Painel
- * Consolidado" (indicadores, tabela de pedidos e histórico/gráfico,
- * acessada pelo botão 📊) e "Painel de Tempos" (métricas de separação e
- * organização, acessada pelo botão ⏳). Apenas uma fica visível por vez;
- * clicar de novo no botão da tela ativa (ou em "Voltar") volta para o
- * Painel Operacional.
- */
-function configurarNavegacaoTelas() {
-  const telaOperacional = document.getElementById('telaOperacional');
-
-  const telas = {
-    consolidado: document.getElementById('telaPainelConsolidado'),
-    tempos: document.getElementById('telaPainelTempos')
-  };
-  const botoesAbrir = {
-    consolidado: document.getElementById('btnPainelConsolidado'),
-    tempos: document.getElementById('btnPainelTempos')
-  };
-  const titulosBotao = {
-    consolidado: 'Painel Consolidado (indicadores, pedidos e histórico)',
-    tempos: 'Painel de Tempos (separação e organização)'
-  };
-
-  function mostrarOperacional() {
-    Object.values(telas).forEach((tela) => { if (tela) tela.hidden = true; });
-    telaOperacional.hidden = false;
-    Object.entries(botoesAbrir).forEach(([chave, botao]) => {
-      if (!botao) return;
-      botao.setAttribute('aria-pressed', 'false');
-      botao.title = titulosBotao[chave];
-    });
-  }
-
-  function mostrarTela(chave) {
-    telaOperacional.hidden = true;
-    Object.entries(telas).forEach(([k, tela]) => { if (tela) tela.hidden = k !== chave; });
-    Object.entries(botoesAbrir).forEach(([k, botao]) => {
-      if (!botao) return;
-      botao.setAttribute('aria-pressed', String(k === chave));
-      botao.title = k === chave ? 'Voltar ao Painel Operacional' : titulosBotao[k];
-    });
-  }
-
-  if (botoesAbrir.consolidado) {
-    botoesAbrir.consolidado.addEventListener('click', () => {
-      if (!telas.consolidado.hidden) mostrarOperacional();
-      else mostrarTela('consolidado');
-    });
-  }
-
-  if (botoesAbrir.tempos) {
-    botoesAbrir.tempos.addEventListener('click', () => {
-      if (!telas.tempos.hidden) mostrarOperacional();
-      else mostrarTela('tempos');
-    });
-  }
-
-  const botaoVoltarConsolidado = document.getElementById('btnVoltarOperacional');
-  if (botaoVoltarConsolidado) botaoVoltarConsolidado.addEventListener('click', mostrarOperacional);
-
-  const botaoVoltarTempos = document.getElementById('btnVoltarOperacionalTempos');
-  if (botaoVoltarTempos) botaoVoltarTempos.addEventListener('click', mostrarOperacional);
-}
-
-/**
- * Modal "Registro de Separação e Organização", com duas seções
- * independentes:
- *   1. Separação - o operador informa o número do pedido e o próprio nome,
- *      e escolhe iniciar ou finalizar a separação física do pedido.
- *   2. Organização - feito por outra pessoa (a organizadora), nos mesmos
- *      moldes, mas só pode ser iniciada depois que a separação do mesmo
- *      pedido estiver finalizada. Ao finalizar a organização, se a
- *      separação já estiver concluída, o pedido é finalizado
- *      automaticamente (ver finalizarOrganizacaoPedido).
- * A data/hora de cada registro é gravada pelo servidor (serverTimestamp) e
- * exibida sempre no horário de Brasília, independentemente do relógio do
- * operador. Esses status são totalmente independentes da Situação (SLA).
- */
-function configurarModalSeparacao() {
-  const modal = document.getElementById('modalSeparacao');
-
-  const campoNumeroSep = document.getElementById('campoSeparacaoNumeroPedido');
-  const campoOperadorSep = document.getElementById('campoSeparacaoOperador');
-  const erroSep = document.getElementById('erroFormSeparacao');
-  const sucessoSep = document.getElementById('sucessoFormSeparacao');
-
-  const campoNumeroOrg = document.getElementById('campoOrganizacaoNumeroPedido');
-  const campoOperadorOrg = document.getElementById('campoOrganizacaoOperador');
-  const erroOrg = document.getElementById('erroFormOrganizacao');
-  const sucessoOrg = document.getElementById('sucessoFormOrganizacao');
-
-  function abrirModal() {
-    document.getElementById('formRegistroSeparacao').reset();
-    document.getElementById('formRegistroOrganizacao').reset();
-    erroSep.hidden = true;
-    sucessoSep.hidden = true;
-    erroOrg.hidden = true;
-    sucessoOrg.hidden = true;
-    modal.hidden = false;
-    campoNumeroSep.focus();
-  }
-
-  function fecharModal() {
-    modal.hidden = true;
-  }
-
-  document.getElementById('btnRegistroSeparacao').addEventListener('click', abrirModal);
-  document.getElementById('btnFecharModalSeparacao').addEventListener('click', fecharModal);
-  modal.addEventListener('click', (evento) => {
-    if (evento.target.id === 'modalSeparacao') fecharModal();
-  });
-
-  // Lê e valida os campos de uma das duas seções (separação ou
-  // organização); retorna o pedido encontrado e o nome do operador, ou
-  // null (já exibindo a mensagem de erro no elemento indicado) se algo
-  // estiver inválido. Reaproveitada pelas duas seções.
-  function lerELocalizarPedido(campoNumero, campoOperador, elementoErro, elementoSucesso) {
-    elementoErro.hidden = true;
-    elementoSucesso.hidden = true;
-
-    const numero = campoNumero.value.trim();
-    const nome = campoOperador.value.trim();
-
-    if (!numero || !nome) {
-      elementoErro.textContent = 'Informe o número do pedido e o nome do operador.';
-      elementoErro.hidden = false;
-      return null;
-    }
-
-    const pedido = buscarPedidoPorNumero(numero);
-    if (!pedido) {
-      elementoErro.textContent = `Nenhum pedido encontrado com o número "${numero}".`;
-      elementoErro.hidden = false;
-      return null;
-    }
-
-    return { pedido, nome };
-  }
-
-  /* --- Seção 1: Separação --- */
-
-  document.getElementById('btnIniciarSeparacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido(campoNumeroSep, campoOperadorSep, erroSep, sucessoSep);
-    if (!dados) return;
-    const { pedido, nome } = dados;
-
-    if (pedido.statusSeparacao === 'em-separacao') {
-      erroSep.textContent = `O pedido ${pedido.numeroPedido} já está em separação, iniciada por ${pedido.operadorInicioSeparacao}.`;
-      erroSep.hidden = false;
-      return;
-    }
-    if (pedido.statusSeparacao === 'separado') {
-      erroSep.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
-      erroSep.hidden = false;
-      return;
-    }
-
-    try {
-      await iniciarSeparacaoPedido(pedido, nome);
-      sucessoSep.textContent = `Separação do pedido ${pedido.numeroPedido} iniciada por ${nome}.`;
-      sucessoSep.hidden = false;
-      campoNumeroSep.value = '';
-      campoNumeroSep.focus();
-    } catch (erroSalvar) {
-      erroSep.textContent = 'Erro ao registrar início da separação: ' + erroSalvar.message;
-      erroSep.hidden = false;
-    }
-  });
-
-  document.getElementById('btnFinalizarSeparacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido(campoNumeroSep, campoOperadorSep, erroSep, sucessoSep);
-    if (!dados) return;
-    const { pedido, nome } = dados;
-
-    if (pedido.statusSeparacao === 'a-separar' || !pedido.statusSeparacao) {
-      erroSep.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a separação iniciada.`;
-      erroSep.hidden = false;
-      return;
-    }
-    if (pedido.statusSeparacao === 'separado') {
-      erroSep.textContent = `O pedido ${pedido.numeroPedido} já foi separado por ${pedido.operadorFimSeparacao}.`;
-      erroSep.hidden = false;
-      return;
-    }
-
-    try {
-      await finalizarSeparacaoPedido(pedido, nome);
-      sucessoSep.textContent = `Separação do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
-      sucessoSep.hidden = false;
-      campoNumeroSep.value = '';
-      campoNumeroSep.focus();
-    } catch (erroSalvar) {
-      erroSep.textContent = 'Erro ao registrar finalização da separação: ' + erroSalvar.message;
-      erroSep.hidden = false;
-    }
-  });
-
-  /* --- Seção 2: Organização --- */
-
-  document.getElementById('btnIniciarOrganizacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido(campoNumeroOrg, campoOperadorOrg, erroOrg, sucessoOrg);
-    if (!dados) return;
-    const { pedido, nome } = dados;
-
-    if (pedido.statusSeparacao !== 'separado') {
-      erroOrg.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a separação finalizada. Finalize a separação antes de iniciar a organização.`;
-      erroOrg.hidden = false;
-      return;
-    }
-    if (pedido.statusOrganizacao === 'em-organizacao') {
-      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já está em organização, iniciada por ${pedido.operadorInicioOrganizacao}.`;
-      erroOrg.hidden = false;
-      return;
-    }
-    if (pedido.statusOrganizacao === 'organizado') {
-      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já foi organizado por ${pedido.operadorFimOrganizacao}.`;
-      erroOrg.hidden = false;
-      return;
-    }
-
-    try {
-      await iniciarOrganizacaoPedido(pedido, nome);
-      sucessoOrg.textContent = `Organização do pedido ${pedido.numeroPedido} iniciada por ${nome}.`;
-      sucessoOrg.hidden = false;
-      campoNumeroOrg.value = '';
-      campoNumeroOrg.focus();
-    } catch (erroSalvar) {
-      erroOrg.textContent = 'Erro ao registrar início da organização: ' + erroSalvar.message;
-      erroOrg.hidden = false;
-    }
-  });
-
-  document.getElementById('btnFinalizarOrganizacao').addEventListener('click', async () => {
-    const dados = lerELocalizarPedido(campoNumeroOrg, campoOperadorOrg, erroOrg, sucessoOrg);
-    if (!dados) return;
-    const { pedido, nome } = dados;
-
-    if (pedido.statusOrganizacao === 'a-organizar' || !pedido.statusOrganizacao) {
-      erroOrg.textContent = `O pedido ${pedido.numeroPedido} ainda não teve a organização iniciada.`;
-      erroOrg.hidden = false;
-      return;
-    }
-    if (pedido.statusOrganizacao === 'organizado') {
-      erroOrg.textContent = `O pedido ${pedido.numeroPedido} já foi organizado por ${pedido.operadorFimOrganizacao}.`;
-      erroOrg.hidden = false;
-      return;
-    }
-
-    try {
-      await finalizarOrganizacaoPedido(pedido, nome);
-      sucessoOrg.textContent = pedido.statusSeparacao === 'separado'
-        ? `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}. Pedido concluído automaticamente.`
-        : `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
-      sucessoOrg.hidden = false;
-      campoNumeroOrg.value = '';
-      campoNumeroOrg.focus();
-    } catch (erroSalvar) {
-      erroOrg.textContent = 'Erro ao registrar finalização da organização: ' + erroSalvar.message;
-      erroOrg.hidden = false;
-    }
-  });
-}
-
-/**
- * Formulário inline de criação de pedidos ("Adicionar Novo Pedido"), sempre
- * visível na página - sem modal. Após adicionar com sucesso, o formulário é
- * limpo e o foco volta ao primeiro campo, para permitir lançamentos
- * consecutivos rápidos.
- */
-function configurarFormularioInlineNovoPedido() {
-  document.getElementById('inlineDataPedido').value = hojeISO();
-
-  document.getElementById('inlineDataRecebimento').addEventListener('input', () =>
-    atualizarPreviewVencimento('inlineDataRecebimento', 'inlineSlaDias', 'previewVencimentoInline')
-  );
-  document.getElementById('inlineSlaDias').addEventListener('input', () =>
-    atualizarPreviewVencimento('inlineDataRecebimento', 'inlineSlaDias', 'previewVencimentoInline')
-  );
-
-  document.getElementById('formNovoPedidoInline').addEventListener('submit', async (evento) => {
-    evento.preventDefault();
-    const erro = document.getElementById('erroFormInline');
-    erro.hidden = true;
-
-    const dados = {
-      numeroPedido: document.getElementById('inlineNumeroPedido').value,
-      cliente: document.getElementById('inlineCliente').value,
-      dataPedido: document.getElementById('inlineDataPedido').value,
-      dataRecebimentoEstoque: document.getElementById('inlineDataRecebimento').value,
-      slaDias: document.getElementById('inlineSlaDias').value,
-      observacao: document.getElementById('inlineObservacao').value
-    };
-
-    const invalido =
-      !dados.numeroPedido.trim() ||
-      !dados.cliente.trim() ||
-      !dados.dataPedido ||
-      !dados.dataRecebimentoEstoque ||
-      !dados.slaDias ||
-      Number(dados.slaDias) <= 0;
-
-    if (invalido) {
-      erro.textContent = 'Preencha Nº Pedido, Cliente, Data do Pedido, Rec. Estoque e SLA com valores válidos.';
-      erro.hidden = false;
-      return;
-    }
-
-    try {
-      await salvarPedido(dados, null);
-      // Limpa os campos para o próximo lançamento, mantendo a Data do
-      // Pedido preenchida com hoje (o caso mais comum).
-      document.getElementById('inlineNumeroPedido').value = '';
-      document.getElementById('inlineCliente').value = '';
-      document.getElementById('inlineDataPedido').value = hojeISO();
-      document.getElementById('inlineDataRecebimento').value = '';
-      document.getElementById('inlineSlaDias').value = '';
-      document.getElementById('inlineObservacao').value = '';
-      atualizarPreviewVencimento('inlineDataRecebimento', 'inlineSlaDias', 'previewVencimentoInline');
-      document.getElementById('inlineNumeroPedido').focus();
-    } catch (erroSalvar) {
-      erro.textContent = 'Erro ao adicionar pedido: ' + erroSalvar.message;
-      erro.hidden = false;
-    }
-  });
-}
-
-/**
- * Busca e filtros existem em dois lugares: o Painel Operacional (campos
- * originais, sem sufixo) e o Painel Consolidado (campos com sufixo "2",
- * entre os indicadores e a lista de pedidos, para facilitar a busca sem
- * precisar trocar de tela). Os dois conjuntos compartilham o mesmo estado
- * (estado.filtros) e ficam sempre sincronizados entre si: alterar um
- * atualiza o outro automaticamente.
- */
-function configurarFiltrosEBusca() {
-  const conjuntosFiltros = [
-    {
-      busca: 'campoBusca', status: 'filtroStatus',
-      recebIni: 'filtroRecebimentoInicio', recebFim: 'filtroRecebimentoFim',
-      vencIni: 'filtroVencimentoInicio', vencFim: 'filtroVencimentoFim',
-      limpar: 'btnLimparFiltros'
-    },
-    {
-      busca: 'campoBusca2', status: 'filtroStatus2',
-      recebIni: 'filtroRecebimentoInicio2', recebFim: 'filtroRecebimentoFim2',
-      vencIni: 'filtroVencimentoInicio2', vencFim: 'filtroVencimentoFim2',
-      limpar: 'btnLimparFiltros2'
-    }
-  ].filter((conjunto) => document.getElementById(conjunto.busca)); // ignora conjuntos ausentes no HTML
-
-  function sincronizarCamposComEstado() {
-    conjuntosFiltros.forEach((conjunto) => {
-      document.getElementById(conjunto.busca).value = estado.filtros.texto;
-      document.getElementById(conjunto.status).value = estado.filtros.status;
-      document.getElementById(conjunto.recebIni).value = estado.filtros.recebIni;
-      document.getElementById(conjunto.recebFim).value = estado.filtros.recebFim;
-      document.getElementById(conjunto.vencIni).value = estado.filtros.vencIni;
-      document.getElementById(conjunto.vencFim).value = estado.filtros.vencFim;
-    });
-  }
-
-  conjuntosFiltros.forEach((conjunto) => {
-    document.getElementById(conjunto.busca).addEventListener('input', (evento) => {
-      estado.filtros.texto = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.status).addEventListener('change', (evento) => {
-      estado.filtros.status = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.recebIni).addEventListener('change', (evento) => {
-      estado.filtros.recebIni = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.recebFim).addEventListener('change', (evento) => {
-      estado.filtros.recebFim = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.vencIni).addEventListener('change', (evento) => {
-      estado.filtros.vencIni = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.vencFim).addEventListener('change', (evento) => {
-      estado.filtros.vencFim = evento.target.value;
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-
-    document.getElementById(conjunto.limpar).addEventListener('click', () => {
-      estado.filtros = { texto: '', status: '', recebIni: '', recebFim: '', vencIni: '', vencFim: '' };
-      sincronizarCamposComEstado();
-      renderizarTudo();
-    });
-  });
-
-  document.getElementById('agrupamentoHistorico').addEventListener('change', (evento) => {
-    estado.agrupamentoHistorico = evento.target.value;
-    renderizarHistorico();
-  });
-}
-
-function exibirStatusConexao(mensagem, erro) {
-  const el = document.getElementById('statusConexao');
-  el.textContent = mensagem;
-  el.hidden = false;
-  el.className = 'status-conexao' + (erro ? ' status-conexao-erro' : '');
-}
-
-function ocultarStatusConexao() {
-  document.getElementById('statusConexao').hidden = true;
-}
-
-/* =========================================================================
-   10. TEMA CLARO/ESCURO (DARK MODE)
-   ========================================================================= */
-const CHAVE_TEMA = 'uniso_sla_tema';
-
-function aplicarTema(tema) {
-  document.documentElement.setAttribute('data-tema', tema);
-  const botao = document.getElementById('btnDarkMode');
-  if (botao) botao.textContent = tema === 'escuro' ? '☀️' : '🌙';
-  // Recalcula o gráfico SVG para usar as cores corretas do novo tema.
-  if (estado.pedidos.length >= 0) renderizarHistorico();
-}
-
-function inicializarTema() {
-  let temaSalvo = null;
-  try {
-    temaSalvo = localStorage.getItem(CHAVE_TEMA);
-  } catch (erro) {
-    // Armazenamento local indisponível (ex.: navegação privada); ignora e segue com o padrão do sistema.
-  }
-
-  if (temaSalvo === 'claro' || temaSalvo === 'escuro') {
-    aplicarTema(temaSalvo);
-  } else {
-    const prefereEscuro = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    aplicarTema(prefereEscuro ? 'escuro' : 'claro');
-  }
-
-  document.getElementById('btnDarkMode').addEventListener('click', () => {
-    const atual = document.documentElement.getAttribute('data-tema');
-    const novo = atual === 'escuro' ? 'claro' : 'escuro';
-    aplicarTema(novo);
-    try {
-      localStorage.setItem(CHAVE_TEMA, novo);
-    } catch (erro) {
-      // Armazenamento local indisponível; a preferência não será persistida nesta sessão.
-    }
-  });
-}
-
-/* =========================================================================
-   10-B. MODO CELULAR (alternância manual de visualização)
-   -------------------------------------------------------------------------
-   Botão independente do dark mode: força o layout compacto (e troca a
-   tabela de pedidos por cartões empilhados) mesmo em uma tela grande,
-   através do atributo data-visualizacao no elemento <html> (ver seção 15
-   de styles.css). Diferente da responsividade automática (que já se
-   adapta sozinha ao tamanho real da tela), este botão é uma escolha
-   manual do usuário, persistida no navegador.
-   ========================================================================= */
-const CHAVE_VISUALIZACAO = 'uniso_sla_visualizacao';
-
-function aplicarModoVisualizacao(modo) {
-  document.documentElement.setAttribute('data-visualizacao', modo);
-  const botao = document.getElementById('btnModoCelular');
-  if (botao) {
-    botao.textContent = modo === 'celular' ? '🖥️' : '📱';
-    botao.title = modo === 'celular' ? 'Voltar para o modo desktop' : 'Alternar para modo celular';
-    botao.setAttribute('aria-label', botao.title);
-  }
-}
-
-function inicializarModoVisualizacao() {
-  let modoSalvo = null;
-  try {
-    modoSalvo = localStorage.getItem(CHAVE_VISUALIZACAO);
-  } catch (erro) {
-    // Armazenamento local indisponível; assume o padrão (desktop).
-  }
-
-  aplicarModoVisualizacao(modoSalvo === 'celular' ? 'celular' : 'desktop');
-
-  document.getElementById('btnModoCelular').addEventListener('click', () => {
-    const atual = document.documentElement.getAttribute('data-visualizacao');
-    const novo = atual === 'celular' ? 'desktop' : 'celular';
-    aplicarModoVisualizacao(novo);
-    try {
-      localStorage.setItem(CHAVE_VISUALIZACAO, novo);
-    } catch (erro) {
-      // Armazenamento local indisponível; a preferência não será persistida nesta sessão.
-    }
-  });
-}
-
-/* =========================================================================
-   11. DADOS DE DEMONSTRAÇÃO (opcional, não executado automaticamente)
-   -------------------------------------------------------------------------
-   Esta função NÃO é chamada em lugar nenhum do carregamento automático do
-   sistema. Ela existe apenas para facilitar testes/demonstrações e pode
-   ser removida deste arquivo sem qualquer impacto no funcionamento do app.
-
-   Para usar: com o app aberto no navegador (F12 > Console), execute:
-     carregarPedidosDemonstracao()
-   Os pedidos criados ficam marcados com "DEMO-" no número do pedido para
-   facilitar a exclusão manual posterior.
-   ========================================================================= */
-async function carregarPedidosDemonstracao() {
-  const hoje = hojeISO();
-  const exemplos = [
-    {
-      numeroPedido: 'DEMO-001',
-      cliente: 'Cliente Exemplo A',
-      dataPedido: hoje,
-      dataRecebimentoEstoque: hoje,
-      slaDias: 5,
-      observacao: 'Pedido de demonstração (dentro do prazo).'
-    },
-    {
-      numeroPedido: 'DEMO-002',
-      cliente: 'Cliente Exemplo B',
-      dataPedido: hoje,
-      dataRecebimentoEstoque: somarDiasUteis(hoje, -6),
-      slaDias: 5,
-      observacao: 'Pedido de demonstração (atrasado).'
-    },
-    {
-      numeroPedido: 'DEMO-003',
-      cliente: 'Cliente Exemplo C',
-      dataPedido: hoje,
-      dataRecebimentoEstoque: somarDiasUteis(hoje, -4),
-      slaDias: 4,
-      observacao: 'Pedido de demonstração (vence hoje).'
-    }
-  ];
-
-  for (const exemplo of exemplos) {
-    await salvarPedido(exemplo, null);
-  }
-  console.info('Pedidos de demonstração criados com sucesso. Exclua-os antes de usar o sistema em produção.');
-}
-window.carregarPedidosDemonstracao = carregarPedidosDemonstracao;
-
-/* =========================================================================
-   12. INICIALIZAÇÃO DA APLICAÇÃO
-   -------------------------------------------------------------------------
-   A configuração de interface (tema, modo celular, formulário, filtros e a
-   primeira renderização) é executada de forma incondicional e SÍNCRONA,
-   antes de qualquer tentativa de carregar o Firebase. Assim, mesmo que o
-   carregamento do Firebase falhe (rede bloqueada, firewall, config
-   inválida), o dark mode, o modo celular e a validação do formulário
-   continuam funcionando normalmente. O carregamento do Firebase é feito
-   por último, de forma assíncrona e isolada, em carregarFirebaseEIniciar().
-   ========================================================================= */
-inicializarTema();
-inicializarModoVisualizacao();
-configurarNavegacaoTelas();
-configurarModais();
-configurarModalSeparacao();
-configurarFormularioInlineNovoPedido();
-configurarFiltrosEBusca();
-renderizarTudo();
-carregarFirebaseEIniciar();
+# Controle de SLA de Pedidos — UNISO
+
+Aplicativo web para acompanhamento operacional de prazos (SLA) de pedidos, com
+sincronização em tempo real entre usuários via Firebase (Authentication +
+Cloud Firestore). Construído em HTML5, CSS3 e JavaScript puro (sem
+frameworks e sem etapa de build).
+
+## Estrutura de arquivos
+
+| Arquivo             | Função                                                              |
+|----------------------|----------------------------------------------------------------------|
+| `index.html`         | Estrutura da página (dashboard, painel, tabela, histórico, modais)   |
+| `styles.css`         | Layout, tema claro/escuro e identidade visual                       |
+| `app.js`             | Toda a lógica: cálculo de SLA, CRUD, renderização e eventos          |
+| `firebase-config.js` | Inicialização do Firebase (credenciais do projeto)                  |
+| `firestore.rules`    | Regras de segurança do Cloud Firestore                              |
+| `README.md`          | Este documento                                                      |
+
+## 1. Configuração do Firebase (obrigatória antes do primeiro uso)
+
+O projeto Firebase **"Controle de SLA de Pedidos"** já existe (plano Spark).
+Faltam três passos no console (https://console.firebase.google.com):
+
+### 1.1. Criar o app Web e obter as credenciais ✅ Concluído
+O app Web já foi cadastrado no projeto e `firebase-config.js` já está
+preenchido com as credenciais reais (`apiKey`, `authDomain`, `projectId`,
+`storageBucket`, `messagingSenderId`, `appId`).
+
+> A `apiKey` de um app Web do Firebase não é um segredo — ela é enviada ao
+> navegador de qualquer visitante por design do próprio Google. A proteção
+> real dos dados está nas regras do Firestore (seção 1.3). Como camada
+> extra, especialmente se o repositório for público no GitHub, é possível
+> restringir essa chave por domínio em **Google Cloud Console → APIs e
+> serviços → Credenciais → [selecione a chave] → Restrições de aplicativo
+> → Sites da Web**.
+
+### 1.2. Ativar a autenticação anônima
+1. Menu **Authentication** → aba **Sign-in method**.
+2. Ative o provedor **Anônimo**.
+   > Não há tela de login nem cadastro de usuários no app — a autenticação
+   > anônima serve apenas para autorizar o acesso ao Firestore, conforme
+   > decidido com o solicitante (sem necessidade de perfis de acesso).
+
+### 1.3. Criar o Firestore e publicar as regras
+1. Menu **Firestore Database** → **Criar banco de dados** → modo produção.
+2. Na aba **Regras**, cole o conteúdo de `firestore.rules` e publique.
+   (Ou publique via Firebase CLI: `firebase deploy --only firestore:rules`.)
+
+## 2. Modelo de dados (coleção `pedidos`)
+
+Cada documento representa um pedido:
+
+| Campo                        | Tipo               | Observação                                             |
+|-------------------------------|--------------------|---------------------------------------------------------|
+| `id` (ID do documento)         | string (auto)      | Identificador único gerado pelo Firestore                |
+| `numeroPedido`                 | string             | Número do pedido informado pelo usuário                  |
+| `cliente`                      | string             | Nome do cliente                                          |
+| `dataPedido`                   | string `yyyy-mm-dd`| Data do pedido                                           |
+| `dataRecebimentoEstoque`       | string `yyyy-mm-dd`| Data de recebimento no estoque                            |
+| `slaDias`                      | number             | Prazo de SLA em **dias úteis**                            |
+| `dataVencimento`               | string `yyyy-mm-dd`| Calculada automaticamente (recebimento + SLA em dias úteis) |
+| `observacao`                   | string             | Texto livre                                              |
+| `status`                       | `"aberto"` \| `"finalizado"` | Único estado controlado (sem "em análise"/"cancelado") |
+| `criadoEm`                     | Timestamp (servidor)| Data/hora de criação                                     |
+| `finalizadoEm`                 | Timestamp (servidor) ou `null` | Data/hora de finalização                     |
+| `resultadoSLA`                 | `"antecipado"` \| `"no_prazo"` \| `"atrasado"` \| `null` | Calculado na finalização |
+| `diasDiferencaFinalizacao`     | number \| `null`   | Diferença em dias úteis entre vencimento e finalização    |
+| `statusSeparacao`              | `"a-separar"` \| `"em-separacao"` \| `"separado"` | Fluxo operacional de separação física, **independente** do SLA e do `status` acima |
+| `operadorInicioSeparacao`      | string \| `null`   | Nome digitado pelo operador ao iniciar a separação          |
+| `dataHoraInicioSeparacao`      | Timestamp (servidor) ou `null` | Data/hora de início da separação                |
+| `operadorFimSeparacao`         | string \| `null`   | Nome digitado pelo operador ao finalizar a separação         |
+| `dataHoraFimSeparacao`         | Timestamp (servidor) ou `null` | Data/hora de fim da separação                    |
+| `statusOrganizacao`            | `"a-organizar"` \| `"em-organizacao"` \| `"organizado"` | Fluxo operacional de conferência/organização para despacho (2ª etapa, após a separação), **independente** do SLA e do `statusSeparacao` acima |
+| `operadorInicioOrganizacao`    | string \| `null`   | Nome digitado pelo operador ao iniciar a organização         |
+| `dataHoraInicioOrganizacao`    | Timestamp (servidor) ou `null` | Data/hora de início da organização               |
+| `operadorFimOrganizacao`       | string \| `null`   | Nome digitado pelo operador ao finalizar a organização        |
+| `dataHoraFimOrganizacao`       | Timestamp (servidor) ou `null` | Data/hora de fim da organização                   |
+
+> Nenhum valor de "dias restantes"/"dias de atraso" é armazenado — tudo é
+> calculado dinamicamente a cada renderização, comparando com a data atual.
+> O mesmo vale para as métricas do Painel de Tempos (tempo médio por
+> operador, histórico diário): tudo é calculado no cliente a partir desta
+> mesma coleção `pedidos`, sem nenhuma coleção ou banco adicional.
+
+> Pedidos criados antes desta atualização não têm os campos de separação
+> nem de organização gravados no Firestore. O app trata essa ausência como
+> `"a-separar"` / `"a-organizar"` automaticamente (nenhuma migração de
+> dados é necessária).
+
+## 3. Premissas assumidas (definidas em conjunto com o solicitante)
+
+Estas decisões foram confirmadas durante o levantamento de requisitos e
+podem ser ajustadas depois, se necessário:
+
+1. **Sem tela de login e sem identificação de usuário.** Não há campos de
+   "usuário criador" nem "usuário responsável pela finalização" — apenas
+   datas/horas de criação e finalização. A autenticação anônima do Firebase
+   é usada apenas como mecanismo técnico invisível para proteger o Firestore.
+2. **Sem perfis/níveis de acesso.** Qualquer sessão autenticada (anônima)
+   tem as mesmas permissões de leitura e escrita.
+3. **Apenas dois status:** `aberto` e `finalizado` (sem "em análise" ou
+   "cancelado").
+4. **Sem campo/filtro de forma de pagamento** (removido do escopo original).
+5. **Todos os prazos são contados em dias úteis** (segunda a sexta-feira),
+   **sem considerar feriados**. Isso vale tanto para o cálculo da data de
+   vencimento quanto para a contagem de dias restantes/atrasados. Caso a
+   UNISO utilize um calendário de feriados, a função `ehDiaUtil()` em
+   `app.js` pode ser estendida para consultá-lo.
+6. **A data de recebimento não conta como um dos dias do prazo** — a
+   contagem começa no dia útil seguinte ao recebimento.
+7. **Cores de atraso:** marrom do 1º ao 4º dia útil de atraso; roxo a
+   partir do 5º dia útil de atraso (configurável em `CONFIG_SLA`, no topo
+   de `app.js`).
+8. **Edição de pedidos** é permitida apenas enquanto o pedido está `aberto`
+   (pedidos finalizados ficam com o histórico travado, preservando a
+   rastreabilidade do resultado do SLA já calculado).
+9. **Histórico operacional:** o campo "Agrupar por" define qual data
+   (recebimento, vencimento ou finalização) determina o dia de cada linha;
+   os pedidos daquele dia são então contados como finalizados/pendentes/
+   atrasados/percentual de conclusão. A janela exibida é de 14 dias.
+10. **Filtros de data** (recebimento e vencimento) foram implementados como
+    intervalos (data inicial/final), permitindo tanto uma data específica
+    quanto um período.
+11. **Duas telas** (adicionado nesta atualização): o app foi dividido em
+    "Painel Operacional" (tela inicial: Painel Consolidado por Prazo, busca/
+    filtros e Adicionar Pedido) e "Painel Consolidado" (indicadores, tabela
+    de pedidos e histórico/gráfico), acessada pelo botão 📊 no cabeçalho. Os
+    filtros de busca ficam na tela operacional e continuam válidos ao
+    navegar para a tabela na outra tela (o estado dos filtros é
+    compartilhado entre as duas telas).
+12. **Status de Separação** (adicionado nesta atualização) é um fluxo
+    totalmente independente da Situação (SLA) e do checkbox "Concluir":
+    acompanha apenas o processo físico de separação do pedido, registrado
+    pelo operador através do botão ⏱️ "Registro de Separação" no cabeçalho.
+13. **Identificação do operador por texto livre**, sem cadastro nem login —
+    coerente com a decisão de não ter perfis de usuário no app (item 1).
+    Nomes digitados de forma diferente (ex.: "João" vs. "joao silva") serão
+    tratados como pessoas diferentes em uma futura análise de tempo médio
+    por operador.
+14. **Horário de Brasília fixo** nos registros de separação
+    (`America/Sao_Paulo`), independentemente do fuso configurado no
+    computador de quem estiver usando o app — para que o tempo entre
+    operadores de máquinas diferentes seja sempre comparável.
+15. **Segunda etapa: Organização** (adicionada nesta atualização). Após a
+    separação, o pedido passa por uma etapa de conferência e organização
+    para despacho, feita por outra pessoa (a "organizadora"), registrada no
+    mesmo modal "Registro de Separação e Organização" (botão ⏱️), em uma
+    2ª seção própria ("Iniciar Organização"/"Finalizar Organização"), com
+    número do pedido e nome digitados de forma independente da seção de
+    Separação. **A organização só pode ser iniciada depois que a separação
+    do mesmo pedido estiver finalizada** — é essa a premissa adotada para
+    "Iniciar Organização" (o sistema bloqueia com uma mensagem de erro caso
+    contrário), coerente com o fluxo físico descrito (organiza-se depois de
+    separar).
+16. **Finalização automática.** O checkbox manual "Concluir" foi removido.
+    Quando a Organização é finalizada e a Separação do mesmo pedido já está
+    concluída, o pedido é finalizado automaticamente — sem nenhuma ação
+    manual — usando a mesma lógica de cálculo de resultado do SLA que já
+    existia (comparação entre a data de hoje e o vencimento). Para corrigir
+    uma finalização indevida, o botão **Reabrir** (na coluna Ações, visível
+    apenas em pedidos finalizados) devolve o pedido para "aberto" sem
+    alterar os registros de separação/organização já feitos.
+17. **Painel de Tempos** (novo, 4º botão no cabeçalho, ícone ⏳): painel com
+    métricas de separação e organização, tudo calculado no cliente a partir
+    da mesma coleção `pedidos` (nenhum banco adicional é necessário).
+    Definições adotadas:
+    - **Total / Pendentes / Concluídas / Taxa de conclusão:** contagem de
+      todos os pedidos da coleção; "Concluídas" = pedidos com `status`
+      `finalizado` (as duas etapas completas, já que a finalização é
+      automática); "Pendentes" = Total − Concluídas.
+    - **Dias registrados:** quantidade de datas distintas em `dataPedido`
+      entre todos os pedidos.
+    - **Tempo médio por operador:** calculado separadamente para Separação
+      e para Organização (não somado), atribuído a quem **finalizou** o
+      registro daquela etapa (`operadorFimSeparacao` / `operadorFimOrganizacao`)
+      — premissa adotada porque, na prática, o mesmo operador normalmente
+      inicia e finaliza a própria etapa. O percentual ao lado indica a
+      participação do operador no volume total de pedidos com aquela etapa
+      concluída (não é uma comparação de velocidade).
+    - **Histórico diário** (últimos 14 dias, agrupado pela Data do Pedido):
+      Status é um selo resumo do dia ("Concluído" = 100% finalizado,
+      "Em andamento" = parcialmente finalizado, "Pendente" = nada
+      finalizado ainda, "-" = nenhum pedido registrado naquele dia); Tempo
+      médio é a soma de separação + organização dos pedidos concluídos
+      daquele dia; "% efetuado no dia" = Concluídas do dia ÷ Total
+      registrado no dia.
+18. **Busca e filtros duplicados** (adicionado nesta atualização): a mesma
+    seção de busca/filtros do Painel Operacional também aparece no Painel
+    Consolidado, entre os indicadores e a lista de pedidos, para facilitar
+    a busca sem precisar trocar de tela. Os dois conjuntos de campos
+    compartilham o mesmo estado de filtros e ficam sempre sincronizados
+    entre si.
+19. **Tabela de pedidos justificada** (adicionado nesta atualização): as
+    colunas têm largura proporcional fixa (via `<colgroup>`), preenchendo
+    sempre 100% da largura do quadro, sem exigir barra de rolagem
+    horizontal em telas de desktop comuns. Textos mais longos (como o
+    badge "FINALIZADO (Antecipado Xd)") quebram em duas linhas dentro da
+    própria célula em vez de vazar para a coluna vizinha.
+20. **Relatório de tempo médio de separação por operador:** implementado
+    nesta atualização, dentro do novo Painel de Tempos (ver item 17) — a
+    premissa anterior (fora do escopo) foi superada por este pedido.
+21. **Nome do organizador na tabela** (ajuste): a coluna "Organização" agora
+    mostra o badge de status e, logo abaixo, o nome de quem iniciou/
+    finalizou a organização (mesmo critério de `obterOperadorAtual`,
+    aplicado à etapa de organização) — sem criar uma coluna extra.
+22. **Botão "Painel Operacional" (🏠) no cabeçalho** (ajuste): antes, a tela
+    inicial só era alcançada pelos botões "Voltar"; agora há um botão
+    próprio no cabeçalho, assim como os demais painéis (Consolidado,
+    Registro de Separação/Organização, Tempos), totalizando 6 botões:
+    🏠 Painel Operacional, 📊 Painel Consolidado, ⏱️ Registro de Separação e
+    Organização, ⏳ Painel de Tempos, 📱 modo celular, 🌙 tema.
+23. **Cabeçalhos da tabela sem corte** (ajuste): títulos de uma palavra só
+    (ex.: "Recebimento", "Vencimento"), mais largos que sua coluna, agora
+    quebram em duas linhas dentro da própria célula (fonte reduzida de
+    0.76rem para 0.7rem) em vez de vazar visualmente para a coluna vizinha.
+24. **Correção manual dos registros de Separação e Organização, pelo modal
+    "Editar Pedido"** (adicionado nesta atualização): além dos campos já
+    existentes, o modal de edição agora tem duas seções — "Separação
+    (correção manual)" e "Organização (correção manual)" — com o nome do
+    operador e a data/hora de início e fim de cada etapa, para o caso de
+    alguém errar ao registrar pelo painel "Registro de Separação e
+    Organização" (⏱️). Regras adotadas:
+    - Nome e data/hora de uma mesma marcação (ex.: "início da separação")
+      devem ser preenchidos juntos, ou os dois deixados em branco para
+      remover aquele registro; o fim de uma etapa não pode ser anterior ao
+      seu início.
+    - As datas/horas são sempre interpretadas em **horário de Brasília**
+      (`America/Sao_Paulo`, UTC-03:00 fixo — o Brasil aboliu o horário de
+      verão em 2019), **independentemente do fuso do computador de quem
+      está editando** — mesma premissa já usada nos registros automáticos
+      (item 14).
+    - O Status (badge) de Separação/Organização é recalculado
+      automaticamente a partir de quais datas ficaram preenchidas (com
+      fim = etapa concluída; só início = em andamento; nenhuma = não
+      iniciada).
+    - A finalização automática do pedido (item 16) é reavaliada a cada
+      correção: se as duas etapas ficarem completas, o pedido é finalizado
+      (usando a data efetiva da correção para calcular o resultado do
+      SLA, não a data da edição); se deixarem de estar completas (ex.:
+      apagaram um horário por engano), o pedido é reaberto automaticamente.
+    - Como pedidos finalizados não podem ser editados (regra já existente),
+      para corrigir um pedido já finalizado é preciso primeiro clicar em
+      **Reabrir** (coluna Ações) e, em seguida, em **Editar**.
+
+Todas essas premissas estão comentadas diretamente no código-fonte
+(`app.js`), próximo à lógica correspondente, para facilitar consultas
+futuras.
+
+## 4. Identidade visual
+
+Como não foi fornecido o manual de marca oficial da UNISO, foi utilizada
+uma paleta corporativa neutra (azul institucional, cinzas e branco) como
+placeholder. As variáveis de cor estão centralizadas no topo de
+`styles.css` (`:root`) e podem ser substituídas pelas cores oficiais a
+qualquer momento, sem necessidade de alterar o restante do CSS.
+
+## 5. Como testar localmente
+
+Como o app usa módulos ES (`type="module"`), é necessário servir os
+arquivos por HTTP (abrir o `index.html` diretamente com `file://` bloqueia
+os imports em alguns navegadores). Duas opções simples:
+
+```bash
+# Opção 1 - usando Python (já vem instalado na maioria dos sistemas)
+cd controle-sla-pedidos-uniso
+python3 -m http.server 8080
+# depois acesse http://localhost:8080
+
+# Opção 2 - usando a extensão "Live Server" do VS Code
+```
+
+Após configurar as credenciais (seção 1), abra o navegador com o Console
+(F12) visível para acompanhar eventuais mensagens de erro de conexão.
+
+### Dados de demonstração (opcionais)
+
+Não há dados fictícios carregados automaticamente. Para popular o sistema
+com 3 pedidos de exemplo (úteis para validar visualmente o dashboard e as
+cores de SLA), abra o Console do navegador com o app carregado e execute:
+
+```js
+carregarPedidosDemonstracao()
+```
+
+Os pedidos de teste são criados com o prefixo `DEMO-` no número do pedido
+para facilitar a exclusão manual antes do uso em produção.
+
+## 6. Publicação (GitHub Pages ou Firebase Hosting)
+
+**GitHub Pages:**
+1. Crie um repositório e envie os arquivos deste diretório (mantendo os
+   nomes/estrutura).
+2. Em Settings → Pages, selecione a branch e a pasta raiz.
+3. Preencha `firebase-config.js` com as credenciais reais antes do commit
+   (essas credenciais são públicas por natureza — a segurança real está
+   nas regras do Firestore, não na ocultação dessas chaves).
+
+**Firebase Hosting:**
+```bash
+npm install -g firebase-tools
+firebase login
+firebase init hosting   # aponte o diretório público para esta pasta
+firebase deploy
+```
+
+## 7. Manutenção e extensão
+
+- **Alterar faixas de SLA (dias/cores):** edite o objeto `CONFIG_SLA` no
+  início de `app.js`.
+- **Alterar cores/rótulos do Status de Separação:** edite o objeto
+  `CONFIG_SEPARACAO`, logo abaixo de `CONFIG_SLA` em `app.js`.
+- **Alterar cores/rótulos do Status de Organização:** edite o objeto
+  `CONFIG_ORGANIZACAO`, logo abaixo de `CONFIG_SEPARACAO` em `app.js`.
+- **Alterar as métricas do Painel de Tempos:** as funções
+  `calcularTemposPorOperador`, `calcularHistoricoTempos` e
+  `renderizarPainelTempos` em `app.js` concentram todos os cálculos desse
+  painel.
+- **Alterar paleta de cores/tema:** edite as variáveis CSS em `:root` e nos
+  blocos `[data-tema="escuro"]` de `styles.css`.
+- **Considerar feriados no cálculo de dias úteis:** ajuste a função
+  `ehDiaUtil()` em `app.js` para consultar uma lista de feriados.
+- Todas as funções em `app.js` têm nomes descritivos em português e
+  comentários explicando seu propósito, conforme solicitado.
+
+## 8. Validação realizada
+
+- Revisão manual da sintaxe de `index.html`, `styles.css`, `app.js` e
+  `firestore.rules`, e checagem automática de sintaxe do JavaScript
+  (`node --check`).
+- Conferência lógica dos cálculos de dias úteis, vencimento e classificação
+  de SLA com casos de teste manuais (datas de exemplo dentro do prazo, no
+  limite e em atraso).
+- Testes automatizados (Playwright, com o Firestore simulado) cobrindo:
+  navegação entre as três telas, colunas Status/Operador/Organização na
+  tabela e nos cartões (modo celular), fluxo completo de Registro de
+  Separação (iniciar, tentar iniciar de novo, finalizar, pedido
+  inexistente), fluxo completo de Organização (bloqueio antes da separação
+  finalizada, iniciar, finalizar com finalização automática do pedido),
+  botão "Reabrir" em pedidos finalizados, independência entre Status de
+  Separação/Organização e Situação (SLA), Painel de Tempos (KPIs, tempo
+  médio por operador com percentuais, histórico diário) validado contra
+  dados conhecidos, sincronização dos dois conjuntos de filtros (Painel
+  Operacional e Painel Consolidado), ausência de rolagem horizontal na
+  tabela de pedidos, dark mode, modo celular, rolagem/cores do rodapé, e
+  resiliência da interface quando o Firebase está inacessível (rede
+  bloqueada).
+- Durante essa validação foi encontrado e corrigido um bug pré-existente
+  (não introduzido nesta atualização, mas exposto pelos novos testes
+  visuais): no modo celular, o campo de busca ficava com ~220px de altura
+  devido a uma regra CSS (`flex: 1 1 220px`) que passa a valer como altura
+  quando o toolbar muda para layout em coluna nesse modo. Corrigido com uma
+  regra específica (`flex-basis: auto`) para o modo celular.
+- **A integração real com o Firebase em produção não foi testada nesta
+  sessão** (o ambiente de desenvolvimento não tem acesso à internet para
+  isso) — os testes acima usam um Firestore simulado. Após publicar estes
+  arquivos, recomenda-se validar no navegador real: sincronização em tempo
+  real entre duas abas/computadores, e o fluxo de Registro de Separação
+  (iniciar em um computador, finalizar em outro).
