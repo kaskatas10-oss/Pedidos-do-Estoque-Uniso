@@ -241,6 +241,24 @@ podem ser ajustadas depois, se necessário:
     - Como pedidos finalizados não podem ser editados (regra já existente),
       para corrigir um pedido já finalizado é preciso primeiro clicar em
       **Reabrir** (coluna Ações) e, em seguida, em **Editar**.
+25. **Busca e filtros somente no Painel Consolidado** (ajuste — supera o item
+    18): a seção de busca/filtros foi removida do Painel Operacional, que
+    passou a conter apenas o Painel Consolidado por Prazo e o formulário
+    "Adicionar Novo Pedido". A busca/filtros permanece exclusivamente no
+    Painel Consolidado, junto com a lista de pedidos. O estado dos filtros
+    (`estado.filtros`) e a lógica de sincronização em `app.js` foram
+    mantidos preparados para reintroduzir um segundo conjunto de campos no
+    futuro, caso necessário.
+26. **Bloqueio de número de pedido duplicado** (adicionado nesta atualização):
+    tanto no formulário "Adicionar Novo Pedido" (Painel Operacional) quanto
+    no modal "Editar Pedido", o número informado é comparado com os demais
+    pedidos já cadastrados (`buscarPedidoPorNumero`, comparação sem
+    diferenciar maiúsculas/minúsculas nem espaços nas pontas). Se já existir
+    outro pedido com o mesmo número, o lançamento/salvamento é bloqueado e
+    uma mensagem de erro identifica o cliente do pedido conflitante, para
+    que o usuário confirme se não é duplicidade antes de prosseguir. Ao
+    editar um pedido sem alterar o seu próprio número, a verificação não o
+    bloqueia (ele não conflita consigo mesmo).
 
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
