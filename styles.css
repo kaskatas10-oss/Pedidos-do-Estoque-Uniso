@@ -418,13 +418,21 @@ thead th {
   background: var(--cor-fundo-elevado);
   color: var(--cor-texto-secundario);
   font-weight: 600;
-  font-size: 0.76rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 10px 12px;
+  letter-spacing: 0.02em;
+  padding: 10px 8px;
   border-bottom: 1px solid var(--cor-borda);
   position: sticky;
   top: 0;
+  /* Com a tabela em table-layout: fixed (colunas estreitas), um título de
+     uma palavra só (ex.: "Recebimento", "Vencimento") pode ser mais largo
+     que a própria coluna. Em vez de vazar para a coluna vizinha e parecer
+     cortado, ele quebra dentro da célula (o cabeçalho já tem altura livre
+     para isso, como "SLA (DIAS ÚTEIS)" já fazia antes). */
+  overflow-wrap: break-word;
+  word-break: break-word;
+  hyphens: auto;
 }
 
 tbody td {
@@ -523,6 +531,20 @@ tbody tr:last-child td { border-bottom: none; }
   flex: 0 0 auto;
 }
 .col-operador { color: var(--cor-texto-secundario); font-size: 0.85rem; white-space: nowrap; }
+
+/* Nome de quem realizou a organização, exibido logo abaixo do badge de
+   Status de Organização na tabela (a coluna "Organização" não tem uma
+   coluna própria de operador, como a Separação tem em "Operador"). Permite
+   quebra de linha (ao contrário de .col-operador) para não vazar para a
+   coluna vizinha em nomes mais longos. */
+.organizador-nome {
+  display: block;
+  margin-top: 3px;
+  color: var(--cor-texto-secundario);
+  font-size: 0.78rem;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
 
 .card-pedido-status-separacao {
   display: flex;
@@ -778,7 +800,9 @@ tbody tr:last-child td { border-bottom: none; }
    14. Responsividade
    --------------------------------------------------------------------- */
 @media (max-width: 720px) {
-  .app-header { padding: 12px 14px; }
+  .app-header { padding: 12px 14px; flex-wrap: wrap; row-gap: 8px; }
+  .header-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .header-actions .btn-icon { width: 30px; height: 30px; font-size: 0.92rem; }
   .app-main { padding: 14px 12px 130px; gap: 16px; }
   .form-grid { grid-template-columns: 1fr; }
   .form-inline-grid { flex-direction: column; align-items: stretch; }
@@ -802,7 +826,9 @@ tbody tr:last-child td { border-bottom: none; }
    cartões empilhados — útil para visualizar/testar a experiência "celular"
    mesmo em uma tela grande.
    --------------------------------------------------------------------- */
-:root[data-visualizacao="celular"] .app-header { padding: 12px 14px; }
+:root[data-visualizacao="celular"] .app-header { padding: 12px 14px; flex-wrap: wrap; row-gap: 8px; }
+:root[data-visualizacao="celular"] .header-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+:root[data-visualizacao="celular"] .header-actions .btn-icon { width: 30px; height: 30px; font-size: 0.92rem; }
 :root[data-visualizacao="celular"] .app-main { padding: 14px 12px 130px; gap: 16px; max-width: 480px; }
 :root[data-visualizacao="celular"] .form-grid { grid-template-columns: 1fr; }
 :root[data-visualizacao="celular"] .dashboard { grid-template-columns: repeat(2, 1fr); }
