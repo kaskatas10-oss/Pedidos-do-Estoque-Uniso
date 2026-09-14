@@ -1097,6 +1097,54 @@ function criarBotoesAcoes(pedido, container) {
   container.appendChild(btnExcluir);
 }
 
+// Determina a próxima fase/ação pendente do atalho de "Atribuição" (coluna
+// da tabela/cartão de pedidos): qual das quatro etapas do fluxo de
+// Separação + Organização ainda falta fazer neste pedido. Retorna null
+// quando não há mais nada pendente por aqui (pedido já finalizado - a
+// finalização automática de finalizarOrganizacaoPedido já cobre esse caso).
+function obterEstadoAtribuicao(pedido) {
+  if (pedido.status === 'finalizado') return null;
+  if (pedido.statusSeparacao !== 'separado') {
+    return { fase: 'separacao', acao: pedido.statusSeparacao === 'em-separacao' ? 'finalizar' : 'atribuir' };
+  }
+  if (pedido.statusOrganizacao !== 'organizado') {
+    return { fase: 'organizacao', acao: pedido.statusOrganizacao === 'em-organizacao' ? 'finalizar' : 'atribuir' };
+  }
+  return null;
+}
+
+const ROTULOS_BOTAO_ATRIBUICAO = {
+  'separacao-atribuir': 'Atribuir Separação',
+  'separacao-finalizar': 'Finalizar Separação',
+  'organizacao-atribuir': 'Atribuir Organização',
+  'organizacao-finalizar': 'Finalizar Organização'
+};
+
+// Cria o botão (ou o texto "Concluído") da coluna/linha "Atribuição",
+// reaproveitado pela tabela e pelo cartão. É um atalho para o mesmo fluxo
+// do painel "Registro de Separação e Organização" (⏱️, que continua
+// existindo sem nenhuma alteração): aqui o pedido já vem identificado (sem
+// precisar digitar o número) e o nome é escolhido em uma lista suspensa,
+// pelo modal #modalAtribuicaoFase (ver abrirModalAtribuicaoFase).
+function criarBotaoAtribuicao(pedido) {
+  const estadoAtribuicao = obterEstadoAtribuicao(pedido);
+
+  if (!estadoAtribuicao) {
+    const span = document.createElement('span');
+    span.className = 'atribuicao-concluida';
+    span.textContent = '✓ Concluído';
+    return span;
+  }
+
+  const { fase, acao } = estadoAtribuicao;
+  const botao = document.createElement('button');
+  botao.type = 'button';
+  botao.className = 'btn btn-link';
+  botao.textContent = ROTULOS_BOTAO_ATRIBUICAO[`${fase}-${acao}`];
+  botao.addEventListener('click', () => abrirModalAtribuicaoFase(pedido, fase, acao));
+  return botao;
+}
+
 function criarLinhaPedido(pedido) {
   const classificacao = pedido._classificacao;
   const tr = document.createElement('tr');
@@ -1158,6 +1206,11 @@ function criarLinhaPedido(pedido) {
     tdOrganizacao.appendChild(spanOrganizador);
   }
   tr.appendChild(tdOrganizacao);
+
+  const tdAtribuicao = document.createElement('td');
+  tdAtribuicao.className = 'col-atribuicao';
+  tdAtribuicao.appendChild(criarBotaoAtribuicao(pedido));
+  tr.appendChild(tdAtribuicao);
 
   const tdAcoes = document.createElement('td');
   tdAcoes.className = 'col-acoes';
@@ -1232,6 +1285,11 @@ function criarCardPedido(pedido) {
 
   const rodape = document.createElement('div');
   rodape.className = 'card-pedido-rodape';
+
+  const linhaAtribuicao = document.createElement('div');
+  linhaAtribuicao.className = 'card-pedido-atribuicao';
+  linhaAtribuicao.appendChild(criarBotaoAtribuicao(pedido));
+  rodape.appendChild(linhaAtribuicao);
 
   const acoes = document.createElement('div');
   acoes.className = 'card-pedido-acoes';
@@ -2169,6 +2227,181 @@ function configurarModalSeparacao() {
 }
 
 /**
+ * Modal de atalho "Atribuir/Finalizar Separação ou Organização", aberto pela
+ * coluna "Atribuição" da tabela/cartão de pedidos (ver criarBotaoAtribuicao).
+ * Faz exatamente o mesmo que o modal "Registro de Separação e Organização"
+ * (⏱️, configurarModalSeparacao acima, que continua existindo sem nenhuma
+ * alteração) - iniciarSeparacaoPedido/finalizarSeparacaoPedido/
+ * iniciarOrganizacaoPedido/finalizarOrganizacaoPedido, com a mesma marcação
+ * automática de data/hora do servidor - só que já com o pedido identificado
+ * e o nome escolhido em uma lista suspensa (com opção de cadastrar um novo
+ * colaborador sem sair daqui), em vez de digitar o número do pedido.
+ */
+const VALOR_CADASTRAR_NOVO_COLABORADOR = '__cadastrar_novo__';
+
+// Guarda apenas o NÚMERO do pedido (não o objeto), para sempre reler o dado
+// mais atual de estado.pedidos no momento da confirmação - o pedido pode ter
+// sido alterado (por outra pessoa, em outra aba) entre a abertura do modal
+// e o clique em "Atribuir"/"Finalizar e dar baixa".
+let numeroPedidoAtribuicaoAtual = null;
+let faseAtribuicaoAtual = null;
+let acaoAtribuicaoAtual = null;
+
+// Popula o select do modal de Atribuição com os colaboradores ativos (mesma
+// base de popularSelectOperador) e acrescenta, ao final, a opção
+// "+ Cadastrar novo colaborador" - exclusiva deste modal.
+function popularSelectAtribuicaoColaborador(valorParaSelecionar) {
+  popularSelectOperador('campoAtribuicaoColaborador', 'Selecione...', valorParaSelecionar);
+  const select = document.getElementById('campoAtribuicaoColaborador');
+  const optCadastrar = document.createElement('option');
+  optCadastrar.value = VALOR_CADASTRAR_NOVO_COLABORADOR;
+  optCadastrar.textContent = '+ Cadastrar novo colaborador';
+  select.appendChild(optCadastrar);
+  select.value = valorParaSelecionar || '';
+}
+
+function configurarModalAtribuicaoFase() {
+  const modal = document.getElementById('modalAtribuicaoFase');
+  const titulo = document.getElementById('modalAtribuicaoFaseTitulo');
+  const campoNumero = document.getElementById('campoAtribuicaoNumeroPedido');
+  const badgeFase = document.getElementById('badgeAtribuicaoFase');
+  const rotuloColaborador = document.getElementById('rotuloAtribuicaoColaborador');
+  const selectColaborador = document.getElementById('campoAtribuicaoColaborador');
+  const nota = document.getElementById('notaAtribuicaoFase');
+  const erro = document.getElementById('erroModalAtribuicaoFase');
+  const btnConfirmar = document.getElementById('btnConfirmarAtribuicaoFase');
+
+  function fecharModal() {
+    modal.hidden = true;
+    numeroPedidoAtribuicaoAtual = null;
+  }
+
+  document.getElementById('btnFecharModalAtribuicaoFase').addEventListener('click', fecharModal);
+  document.getElementById('btnCancelarAtribuicaoFase').addEventListener('click', fecharModal);
+  modal.addEventListener('click', (evento) => {
+    if (evento.target.id === 'modalAtribuicaoFase') fecharModal();
+  });
+
+  // Escolher "+ Cadastrar novo colaborador" pede o nome (mesmo padrão de
+  // "Editar" na tela Colaboradores, via prompt()), cadastra e já seleciona
+  // o nome recém-criado - sem precisar abrir a tela Colaboradores.
+  selectColaborador.addEventListener('change', () => {
+    if (selectColaborador.value !== VALOR_CADASTRAR_NOVO_COLABORADOR) return;
+
+    const nomeNovo = prompt('Nome do novo colaborador:');
+    const nomeTratado = (nomeNovo || '').trim();
+    if (!nomeTratado) {
+      popularSelectAtribuicaoColaborador('');
+      return;
+    }
+
+    const existente = buscarColaboradorPorNome(nomeTratado);
+    if (existente) {
+      if (!existente.ativo) {
+        alert(`"${existente.nome}" já está cadastrado, mas está inativo. Reative-o na tela Colaboradores antes de usá-lo aqui.`);
+        popularSelectAtribuicaoColaborador('');
+        return;
+      }
+      popularSelectAtribuicaoColaborador(existente.nome);
+      return;
+    }
+
+    adicionarColaborador(nomeTratado)
+      .then(() => popularSelectAtribuicaoColaborador(nomeTratado))
+      .catch((erroSalvar) => {
+        alert('Erro ao cadastrar colaborador: ' + erroSalvar.message);
+        popularSelectAtribuicaoColaborador('');
+      });
+  });
+
+  // Chamada por criarBotaoAtribuicao. `fase` é 'separacao' ou 'organizacao';
+  // `acao` é 'atribuir' ou 'finalizar'.
+  window.abrirModalAtribuicaoFase = function abrirModalAtribuicaoFase(pedido, fase, acao) {
+    numeroPedidoAtribuicaoAtual = pedido.numeroPedido;
+    faseAtribuicaoAtual = fase;
+    acaoAtribuicaoAtual = acao;
+    erro.hidden = true;
+
+    campoNumero.value = pedido.numeroPedido;
+
+    const ehSeparacao = fase === 'separacao';
+    badgeFase.textContent = ehSeparacao ? '📦 Fase 1 de 2 — Separação' : '🔨 Fase 2 de 2 — Organização (na mesa)';
+    badgeFase.className = 'badge-fase ' + (ehSeparacao ? 'badge-fase-separacao' : 'badge-fase-organizacao');
+
+    if (acao === 'atribuir') {
+      titulo.textContent = ehSeparacao ? 'Atribuir Separação' : 'Atribuir Organização';
+      rotuloColaborador.textContent = ehSeparacao ? 'Colaborador da Separação' : 'Colaborador da Organização';
+      selectColaborador.disabled = false;
+      popularSelectAtribuicaoColaborador('');
+      nota.textContent = '💡 O início desta fase é registrado automaticamente, com a data e a hora do sistema.';
+      btnConfirmar.textContent = 'Atribuir';
+    } else {
+      titulo.textContent = ehSeparacao ? 'Finalizar Separação' : 'Finalizar Organização';
+      rotuloColaborador.textContent = 'Colaborador Responsável';
+      const nomeResponsavel = ehSeparacao ? pedido.operadorInicioSeparacao : pedido.operadorInicioOrganizacao;
+      popularSelectAtribuicaoColaborador(nomeResponsavel || '');
+      selectColaborador.disabled = true;
+      nota.textContent = '💡 O fim desta fase é registrado automaticamente, com a data e a hora do sistema — o tempo é calculado a partir do início já registrado.';
+      btnConfirmar.textContent = 'Finalizar e dar baixa';
+    }
+
+    modal.hidden = false;
+  };
+
+  btnConfirmar.addEventListener('click', async () => {
+    if (!numeroPedidoAtribuicaoAtual) return;
+    erro.hidden = true;
+
+    // Relê o pedido a partir do estado atual (não do objeto capturado ao
+    // abrir o modal), para nunca agir sobre um dado desatualizado.
+    const pedidoAtual = buscarPedidoPorNumero(numeroPedidoAtribuicaoAtual);
+    if (!pedidoAtual) {
+      erro.textContent = 'Este pedido não foi encontrado (pode ter sido excluído). Feche esta janela e atualize a lista.';
+      erro.hidden = false;
+      return;
+    }
+    const estadoAtual = obterEstadoAtribuicao(pedidoAtual);
+    if (!estadoAtual || estadoAtual.fase !== faseAtribuicaoAtual || estadoAtual.acao !== acaoAtribuicaoAtual) {
+      erro.textContent = 'O status deste pedido já foi alterado (por outra pessoa ou em outra aba). Feche esta janela e tente novamente pela lista atualizada.';
+      erro.hidden = false;
+      return;
+    }
+
+    const nome = selectColaborador.value;
+    if (acaoAtribuicaoAtual === 'atribuir' && (!nome || nome === VALOR_CADASTRAR_NOVO_COLABORADOR)) {
+      erro.textContent = 'Selecione o nome do colaborador.';
+      erro.hidden = false;
+      return;
+    }
+
+    try {
+      if (faseAtribuicaoAtual === 'separacao' && acaoAtribuicaoAtual === 'atribuir') {
+        await iniciarSeparacaoPedido(pedidoAtual, nome);
+        exibirAvisoAtribuicao('Separação atribuída.');
+      } else if (faseAtribuicaoAtual === 'separacao' && acaoAtribuicaoAtual === 'finalizar') {
+        await finalizarSeparacaoPedido(pedidoAtual, nome);
+        exibirAvisoAtribuicao('Separação finalizada.');
+      } else if (faseAtribuicaoAtual === 'organizacao' && acaoAtribuicaoAtual === 'atribuir') {
+        await iniciarOrganizacaoPedido(pedidoAtual, nome);
+        exibirAvisoAtribuicao('Organização atribuída.');
+      } else if (faseAtribuicaoAtual === 'organizacao' && acaoAtribuicaoAtual === 'finalizar') {
+        await finalizarOrganizacaoPedido(pedidoAtual, nome);
+        exibirAvisoAtribuicao('Pedido finalizado e baixado.');
+      }
+      fecharModal();
+    } catch (erroSalvar) {
+      erro.textContent = 'Erro ao salvar: ' + erroSalvar.message;
+      erro.hidden = false;
+    }
+  });
+
+  document.getElementById('btnFecharAvisoAtribuicao').addEventListener('click', () => {
+    clearTimeout(timeoutAvisoAtribuicao);
+    document.getElementById('avisoAtribuicao').hidden = true;
+  });
+}
+
+/**
  * Formulário "Adicionar Colaborador" (tela Colaboradores) e botão "Importar
  * nomes dos pedidos". Mesmo padrão do formulário inline de pedidos: sempre
  * visível, sem modal, limpa e devolve o foco ao campo após adicionar.
@@ -2397,6 +2630,19 @@ function ocultarStatusConexao() {
   document.getElementById('statusConexao').hidden = true;
 }
 
+// Aviso de confirmação exibido no topo do Painel Consolidado a cada
+// Atribuir/Finalizar Separação ou Organização feito pela coluna
+// "Atribuição" (ver modalAtribuicaoFase). Fecha ao clicar no X ou
+// automaticamente após alguns segundos.
+let timeoutAvisoAtribuicao = null;
+function exibirAvisoAtribuicao(mensagem) {
+  const aviso = document.getElementById('avisoAtribuicao');
+  document.getElementById('textoAvisoAtribuicao').textContent = mensagem;
+  aviso.hidden = false;
+  clearTimeout(timeoutAvisoAtribuicao);
+  timeoutAvisoAtribuicao = setTimeout(() => { aviso.hidden = true; }, 6000);
+}
+
 /* =========================================================================
    10. TEMA CLARO/ESCURO (DARK MODE)
    ========================================================================= */
@@ -2545,6 +2791,7 @@ inicializarModoVisualizacao();
 configurarNavegacaoTelas();
 configurarModais();
 configurarModalSeparacao();
+configurarModalAtribuicaoFase();
 configurarFormularioInlineNovoPedido();
 configurarFormularioColaboradores();
 configurarFiltrosEBusca();
