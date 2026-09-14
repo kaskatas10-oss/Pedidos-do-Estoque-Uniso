@@ -777,6 +777,88 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .lista-modal-venc { color: var(--cor-texto-secundario); font-size: 0.82rem; }
 
+/* Coluna "Atribuição" na tabela/cartão de pedidos (Painel Consolidado):
+   atalho de Atribuir/Finalizar Separação e Organização direto na linha do
+   pedido, sem precisar abrir o modal ⏱️ e digitar o número (ver
+   criarBotaoAtribuicao e modalAtribuicaoFase em app.js). */
+.col-atribuicao .btn-link { white-space: nowrap; }
+.atribuicao-concluida {
+  color: var(--cor-sucesso);
+  font-weight: 600;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.card-pedido-atribuicao { margin-top: 2px; }
+
+/* Corpo do modal de Atribuir/Finalizar fase: campos em coluna única (não
+   reaproveita .form-grid, que é em grade de 2 colunas, para não alterar seu
+   comportamento nos demais modais que já o usam). */
+.atribuicao-corpo {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.atribuicao-corpo label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--cor-texto-secundario);
+  font-weight: 600;
+}
+.atribuicao-corpo input,
+.atribuicao-corpo select {
+  padding: 9px 10px;
+  border: 1px solid var(--cor-borda);
+  border-radius: var(--raio-padrao);
+  background: var(--cor-fundo-elevado);
+  color: var(--cor-texto);
+  font-weight: 400;
+}
+.atribuicao-corpo input:disabled,
+.atribuicao-corpo select:disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+/* Selo de fase (1 de 2 - Separação / 2 de 2 - Organização) no modal de
+   Atribuição, mesmo padrão de cor de "a-separar"/"a-organizar" (perigo) e
+   "separado"/"organizado" (sucesso) usado no restante do app. */
+.badge-fase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0;
+  width: fit-content;
+}
+.badge-fase-separacao { background: rgba(46, 125, 50, 0.16); color: #2e7d32; }
+.badge-fase-organizacao { background: rgba(230, 126, 34, 0.18); color: #b8860b; }
+
+/* Aviso de confirmação (mensagem fixa no topo do Painel Consolidado, com
+   botão de fechar) exibido a cada ação feita pela coluna "Atribuição". */
+.aviso-atribuicao {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(46, 125, 50, 0.12);
+  border: 1px solid var(--cor-sucesso);
+  color: var(--cor-sucesso);
+  border-radius: var(--raio-padrao);
+  padding: 10px 14px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+/* Mesmo padrão de .modal-overlay[hidden] acima: como .aviso-atribuicao já
+   define "display", o atributo "hidden" (mesma especificidade) perderia
+   para essa regra pela ordem de origem sem este seletor mais específico. */
+.aviso-atribuicao[hidden] { display: none; }
+.aviso-atribuicao .btn-icon { width: 26px; height: 26px; font-size: 0.8rem; border-color: currentColor; flex: 0 0 auto; }
+
 /* ---------------------------------------------------------------------
    13. Status de conexão
    --------------------------------------------------------------------- */
