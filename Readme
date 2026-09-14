@@ -334,6 +334,42 @@ podem ser ajustadas depois, se necessário:
       do Firebase (ver seção 1.3), além de atualizar os 3 arquivos de sempre
       no GitHub Pages. Sem esse passo, a tela Colaboradores fica sem
       permissão de acesso ao Firestore.
+28. **Coluna "Atribuição" no Painel Consolidado** (adicionado nesta
+    atualização): atalho para atribuir/finalizar Separação e Organização
+    direto na linha do pedido (tabela e cartão do modo celular), sem
+    precisar abrir o painel "Registro de Separação e Organização" (⏱️) e
+    digitar o número do pedido — que continua existindo exatamente como
+    antes, sem nenhuma alteração, para quem preferir usá-lo. É apenas um
+    caminho mais curto para o mesmo fluxo: usa as mesmas funções e a mesma
+    marcação automática de data/hora do servidor (nenhum cálculo de SLA,
+    tempo médio por operador ou finalização automática muda).
+    - **Botão dinâmico**, um por pedido, que muda de rótulo conforme o
+      andamento: "Atribuir Separação" → "Finalizar Separação" → "Atribuir
+      Organização" → "Finalizar Organização"; quando o pedido é finalizado
+      automaticamente (mesma regra do item 16), o botão dá lugar a um texto
+      "✓ Concluído".
+    - **Modal curto de atribuição/finalização**: mostra o número do pedido
+      (somente leitura), um selo da fase atual ("📦 Fase 1 de 2 —
+      Separação" ou "🔨 Fase 2 de 2 — Organização (na mesa)") e uma lista
+      suspensa para escolher o colaborador (nos passos de "Atribuir") ou o
+      nome do responsável já preenchido e bloqueado (nos passos de
+      "Finalizar", já que quem finaliza normalmente é quem iniciou — mesma
+      premissa do item 17). A lista suspensa tem, ao final, a opção
+      "+ Cadastrar novo colaborador": escolhê-la pede o nome, cadastra e já
+      seleciona o colaborador recém-criado, sem precisar sair para a tela
+      Colaboradores.
+    - **Cada ação exibe um aviso de confirmação** no topo do Painel
+      Consolidado, que fecha sozinho após alguns segundos ou ao clicar no
+      "✕": "Separação atribuída.", "Separação finalizada.", "Organização
+      atribuída." e, ao finalizar a organização, "Pedido finalizado e
+      baixado." (substituindo, nesse último caso, o aviso genérico de
+      finalização — mensagem única, mais direta).
+    - **Proteção contra dado desatualizado:** ao confirmar, o pedido é
+      relido do estado mais atual (não do que estava na tela quando o modal
+      foi aberto); se o status já tiver mudado nesse meio-tempo (ex.: outra
+      pessoa atribuiu no mesmo instante, em outra aba), a ação é bloqueada
+      com um aviso pedindo para tentar novamente pela lista atualizada, em
+      vez de sobrescrever silenciosamente o que a outra pessoa já fez.
 
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
@@ -454,6 +490,25 @@ firebase deploy
   corretamente, lista suspensa mostrando apenas o texto de instrução sem
   travar, e abertura do modal "Editar Pedido" com os campos de operador em
   branco, sem erros. Em todos os casos, zero erros JavaScript não tratados.
+- **Coluna "Atribuição" (item 28):** testes automatizados (Playwright)
+  cobrindo o fluxo completo pela nova coluna: Atribuir Separação → Finalizar
+  Separação → Atribuir Organização → Finalizar Organização, com o pedido
+  sendo finalizado automaticamente ao final (badge "✓ Concluído" no lugar do
+  botão); validação de campo obrigatório (não deixa confirmar sem escolher
+  colaborador); modal de "Finalizar" mostrando o responsável já preenchido e
+  bloqueado; cadastro de um novo colaborador direto pela opção "+ Cadastrar
+  novo colaborador" dentro do modal, refletido corretamente na tela
+  Colaboradores; conferência de que os avisos de confirmação mostram
+  exatamente as mensagens esperadas em cada etapa e fecham ao clicar no "✕";
+  e regressão confirmando que o modal "Registro de Separação e Organização"
+  (⏱️) e o bloqueio de número de pedido duplicado continuam funcionando sem
+  nenhuma alteração. Zero erros JavaScript não tratados.
+  - Durante essa validação foi encontrado e corrigido um bug de CSS: como a
+    classe `.aviso-atribuicao` já definia `display`, o atributo `hidden`
+    (mesma especificidade) deixava de esconder visualmente o aviso apesar de
+    a propriedade JavaScript estar correta — mesma armadilha que o app já
+    neutraliza para os modais (`.modal-overlay[hidden]`). Corrigido com a
+    mesma técnica: uma regra `.aviso-atribuicao[hidden] { display: none; }`.
 - Durante essa validação foi encontrado e corrigido um bug pré-existente
   (não introduzido nesta atualização, mas exposto pelos novos testes
   visuais): no modo celular, o campo de busca ficava com ~220px de altura
