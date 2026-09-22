@@ -566,6 +566,17 @@ tbody tr:last-child td { border-bottom: none; }
   gap: 10px;
   margin-bottom: 10px;
 }
+
+/* Cabeçalho da seção "Pedidos" (título + botão "Extrair Dados (Excel)"),
+   mesma disposição do cabeçalho do Histórico Operacional acima. */
+.lista-pedidos-cabecalho {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
 .historico-controles { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--cor-texto-secundario); }
 .historico-controles select {
   padding: 6px 10px;
