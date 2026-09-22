@@ -370,6 +370,40 @@ podem ser ajustadas depois, se necessário:
       pessoa atribuiu no mesmo instante, em outra aba), a ação é bloqueada
       com um aviso pedindo para tentar novamente pela lista atualizada, em
       vez de sobrescrever silenciosamente o que a outra pessoa já fez.
+29. **Extração de dados em Excel** (adicionado nesta atualização): botão
+    "📥 Extrair Dados (Excel)" na seção "Pedidos" do Painel Consolidado, ao
+    lado do título. Gera um arquivo `.xlsx` inteiramente no navegador (não
+    depende de nenhum servidor/backend nem grava nada no Firestore — é
+    somente leitura), pronto para apresentação de resultados. Duas abas:
+    - **"Resumo":** data/hora da extração, total de pedidos, pedidos em
+      aberto, pedidos finalizados (baixados), taxa de conclusão, quantos
+      finalizados foram antecipados/no prazo/atrasados, e o tempo médio por
+      operador em cada etapa (Separação e Organização) — mesmos critérios
+      de cálculo do Painel de Tempos (item 17).
+    - **"Pedidos":** uma linha por pedido, com número, cliente, datas,
+      SLA em dias úteis, situação atual (no prazo/vence hoje/atrasado ou,
+      se finalizado, antecipado/no prazo/atrasado com a diferença em dias),
+      status e operador de cada etapa (Separação e Organização), data/hora
+      de início e fim de cada etapa (horário de Brasília), tempo de cada
+      etapa e o tempo total, resultado do SLA na finalização e observação.
+    - **Respeita a busca e os filtros já aplicados** no Painel Consolidado
+      (mesmo critério de `pedidoPassaFiltros` usado pela tabela): a
+      extração traz exatamente os pedidos exibidos na tela no momento do
+      clique — por exemplo, filtrar por um período de vencimento antes de
+      extrair gera uma planilha só daquele período. Para extrair todos os
+      pedidos, basta limpar os filtros antes de clicar.
+    - **Premissa adotada:** como o pedido não especificou um período fixo
+      (mês, trimestre etc.), a extração foi ligada aos filtros de busca já
+      existentes no painel, em vez de abrir uma nova tela de seleção de
+      período — reaproveita um mecanismo que o usuário já conhece e evita
+      duplicar a lógica de filtros. Se for necessário um recorte diferente
+      (ex.: seleção de intervalo específico só para a extração, sem afetar
+      o que é exibido na tela), é possível ajustar depois.
+    - Requer a biblioteca gratuita SheetJS, carregada de um CDN público
+      (`cdnjs.cloudflare.com`) declarado em `index.html`; se a rede/CDN
+      estiver bloqueada no momento do clique, aparece um aviso explicando o
+      problema em vez de travar a página, e o restante do app continua
+      funcionando normalmente.
 
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
@@ -515,6 +549,26 @@ firebase deploy
   devido a uma regra CSS (`flex: 1 1 220px`) que passa a valer como altura
   quando o toolbar muda para layout em coluna nesse modo. Corrigido com uma
   regra específica (`flex-basis: auto`) para o modo celular.
+- **Extração de dados em Excel (item 29):** testes automatizados
+  (Playwright, com a biblioteca SheetJS simulada) cobrindo: geração do
+  arquivo com nome no padrão esperado; conteúdo correto da aba "Pedidos"
+  (situação de SLA, resultado da finalização, operadores, datas/horas e
+  tempos de cada etapa calculados corretamente, célula vazia quando uma
+  etapa ainda está incompleta); conteúdo correto da aba "Resumo" (total,
+  finalizados, em aberto, antecipados, tempo médio por operador); a
+  extração respeitando um filtro de busca aplicado (traz só o pedido
+  filtrado); aviso de erro exibido corretamente quando o CDN da biblioteca
+  está bloqueado (sem travar a página nem gerar erro JavaScript não
+  tratado); e regressão confirmando que o fluxo da coluna "Atribuição"
+  (item 28) continua funcionando sem alteração. Zero erros JavaScript não
+  tratados em todos os cenários.
+  - **Não testado nesta sessão:** o carregamento real da biblioteca a
+    partir do CDN público (`cdnjs.cloudflare.com`), pois o ambiente de
+    desenvolvimento não tem acesso a esse domínio específico — os testes
+    acima substituem a biblioteca por uma versão simulada equivalente.
+    Recomenda-se, após publicar os arquivos, clicar uma vez em "Extrair
+    Dados (Excel)" no navegador real para confirmar que o download ocorre
+    normalmente.
 - **A integração real com o Firebase em produção não foi testada nesta
   sessão** (o ambiente de desenvolvimento não tem acesso à internet para
   isso) — os testes acima usam um Firestore simulado. Após publicar estes
