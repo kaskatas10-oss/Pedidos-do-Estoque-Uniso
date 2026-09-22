@@ -2728,6 +2728,171 @@ function inicializarModoVisualizacao() {
 }
 
 /* =========================================================================
+   10-B. EXTRAÇÃO DE DADOS (EXCEL)
+   -------------------------------------------------------------------------
+   Botão "📥 Extrair Dados (Excel)" na seção "Pedidos" do Painel
+   Consolidado. Gera um arquivo .xlsx inteiramente no navegador (biblioteca
+   SheetJS, carregada via CDN em index.html) com os MESMOS pedidos
+   exibidos na tabela/cartões no momento do clique — ou seja, respeita a
+   busca e os filtros já aplicados (mesma lista que passa por
+   pedidoPassaFiltros, mesma ordenação por criticidade). Não depende de
+   nenhum backend nem grava nada no Firestore; é somente leitura.
+
+   O arquivo tem duas abas:
+   - "Pedidos": uma linha por pedido, com situação de SLA, os registros de
+     Separação e Organização (operador, início, fim, duração de cada
+     etapa) e o resultado da finalização (antecipado/no prazo/atrasado).
+   - "Resumo": indicadores gerais (mesmos critérios do Painel de Tempos:
+     total, finalizados, em aberto, taxa de conclusão) e o tempo médio por
+     operador em cada etapa, calculados sobre a mesma lista exportada.
+   ========================================================================= */
+
+// Situação (SLA) em texto simples para a planilha - mesma lógica de
+// textoSituacao(), mas sem caixa alta forçada nem o rótulo do badge, para
+// ficar mais natural em uma coluna de relatório.
+function situacaoParaPlanilha(pedido, classificacao) {
+  if (pedido.status === 'finalizado') {
+    if (pedido.resultadoSLA === 'antecipado') return `Finalizado - Antecipado (${pedido.diasDiferencaFinalizacao}d)`;
+    if (pedido.resultadoSLA === 'atrasado') return `Finalizado - Atrasado (${pedido.diasDiferencaFinalizacao}d)`;
+    return 'Finalizado - No prazo';
+  }
+  if (classificacao.chave === 'vence-hoje') return 'Vence hoje';
+  if (classificacao.chave === 'marrom' || classificacao.chave === 'roxo') {
+    return `Atrasado (${classificacao.diasAtraso}d)`;
+  }
+  if (classificacao.diasRestantes === 1) return 'Vence em 1 dia';
+  return `Vence em ${classificacao.diasRestantes} dias`;
+}
+
+// Duração em milissegundos formatada como texto de planilha (ex.: "2h 15min"),
+// reaproveitando formatarDuracao(); célula vazia quando a etapa não está completa.
+function duracaoParaPlanilha(ms) {
+  return ms == null ? '' : formatarDuracao(ms);
+}
+
+// Monta a lista de pedidos a exportar: os mesmos pedidos e a mesma ordem
+// já exibidos na tela (classificação de SLA recalculada + filtros de
+// busca/status/data atualmente aplicados no Painel Consolidado).
+function obterPedidosParaExportacao() {
+  const classificados = estado.pedidos.map((pedido) => ({ ...pedido, _classificacao: classificarPedido(pedido) }));
+  const filtrados = classificados.filter(pedidoPassaFiltros);
+  filtrados.sort((a, b) => {
+    const ordemA = ordemCriticidade(a._classificacao);
+    const ordemB = ordemCriticidade(b._classificacao);
+    if (ordemA !== ordemB) return ordemA - ordemB;
+    const diasA = a._classificacao.diasRestantes ?? 0;
+    const diasB = b._classificacao.diasRestantes ?? 0;
+    return diasA - diasB;
+  });
+  return filtrados;
+}
+
+function montarLinhasPlanilhaPedidos(lista) {
+  return lista.map((pedido) => ({
+    'Nº Pedido': pedido.numeroPedido,
+    Cliente: pedido.cliente,
+    'Data Pedido': formatarBR(pedido.dataPedido),
+    'Data Recebimento': formatarBR(pedido.dataRecebimentoEstoque),
+    'SLA (dias úteis)': pedido.slaDias,
+    'Data Vencimento': formatarBR(pedido.dataVencimento),
+    Situação: situacaoParaPlanilha(pedido, pedido._classificacao),
+    'Status do Pedido': pedido.status === 'finalizado' ? 'Finalizado' : 'Aberto',
+    'Resultado do SLA': pedido.status === 'finalizado'
+      ? { antecipado: 'Antecipado', no_prazo: 'No prazo', atrasado: 'Atrasado' }[pedido.resultadoSLA] || '-'
+      : '-',
+    'Dias de Diferença (Finalização)': pedido.status === 'finalizado' && pedido.diasDiferencaFinalizacao != null
+      ? pedido.diasDiferencaFinalizacao
+      : '',
+    'Data/Hora Finalização': pedido.status === 'finalizado' ? formatarDataHoraBrasilia(pedido.finalizadoEm) : '',
+    'Status Separação': (CONFIG_SEPARACAO[pedido.statusSeparacao || 'a-separar'] || {}).label || '',
+    'Operador Separação': obterOperadorAtual(pedido) === '-' ? '' : obterOperadorAtual(pedido),
+    'Início Separação': formatarDataHoraBrasilia(pedido.dataHoraInicioSeparacao),
+    'Fim Separação': formatarDataHoraBrasilia(pedido.dataHoraFimSeparacao),
+    'Tempo de Separação': duracaoParaPlanilha(duracaoSeparacaoMs(pedido)),
+    'Status Organização': (CONFIG_ORGANIZACAO[pedido.statusOrganizacao || 'a-organizar'] || {}).label || '',
+    'Operador Organização': obterOperadorOrganizacaoAtual(pedido) === '-' ? '' : obterOperadorOrganizacaoAtual(pedido),
+    'Início Organização': formatarDataHoraBrasilia(pedido.dataHoraInicioOrganizacao),
+    'Fim Organização': formatarDataHoraBrasilia(pedido.dataHoraFimOrganizacao),
+    'Tempo de Organização': duracaoParaPlanilha(duracaoOrganizacaoMs(pedido)),
+    'Tempo Total (Separação + Organização)': duracaoParaPlanilha(duracaoTotalMs(pedido)),
+    Observação: pedido.observacao || ''
+  }));
+}
+
+function montarLinhasPlanilhaResumo(lista) {
+  const total = lista.length;
+  const finalizados = lista.filter((p) => p.status === 'finalizado');
+  const emAberto = total - finalizados.length;
+  const taxaConclusao = total > 0 ? Math.round((finalizados.length / total) * 100) : 0;
+  const antecipados = finalizados.filter((p) => p.resultadoSLA === 'antecipado').length;
+  const noPrazo = finalizados.filter((p) => p.resultadoSLA === 'no_prazo').length;
+  const atrasados = finalizados.filter((p) => p.resultadoSLA === 'atrasado').length;
+
+  const linhas = [
+    { Indicador: 'Data de extração', Valor: formatarDataHoraBrasilia(new Date()) },
+    { Indicador: 'Total de pedidos (nesta extração)', Valor: total },
+    { Indicador: 'Pedidos em aberto', Valor: emAberto },
+    { Indicador: 'Pedidos finalizados (baixados)', Valor: finalizados.length },
+    { Indicador: 'Taxa de conclusão', Valor: `${taxaConclusao}%` },
+    { Indicador: '— Dos finalizados: antecipados', Valor: antecipados },
+    { Indicador: '— Dos finalizados: no prazo', Valor: noPrazo },
+    { Indicador: '— Dos finalizados: atrasados', Valor: atrasados },
+    { Indicador: '', Valor: '' },
+    { Indicador: 'Tempo médio por operador — Separação', Valor: '' }
+  ];
+
+  calcularTemposPorOperador(lista, 'operadorFimSeparacao', duracaoSeparacaoMs).forEach((item) => {
+    linhas.push({ Indicador: `   ${item.operador}`, Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%)` });
+  });
+
+  linhas.push({ Indicador: '', Valor: '' });
+  linhas.push({ Indicador: 'Tempo médio por operador — Organização', Valor: '' });
+  calcularTemposPorOperador(lista, 'operadorFimOrganizacao', duracaoOrganizacaoMs).forEach((item) => {
+    linhas.push({ Indicador: `   ${item.operador}`, Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%)` });
+  });
+
+  return linhas;
+}
+
+function exportarDadosParaExcel() {
+  const erroEl = document.getElementById('erroExtrairExcel');
+  if (typeof XLSX === 'undefined') {
+    if (erroEl) {
+      erroEl.textContent = 'Não foi possível carregar a biblioteca de geração do Excel (verifique a conexão com a internet e recarregue a página).';
+      erroEl.hidden = false;
+    }
+    return;
+  }
+  if (erroEl) erroEl.hidden = true;
+
+  const lista = obterPedidosParaExportacao();
+  if (lista.length === 0) {
+    if (erroEl) {
+      erroEl.textContent = 'Nenhum pedido para exportar com a busca/filtros atuais.';
+      erroEl.hidden = false;
+    }
+    return;
+  }
+
+  const planilhaPedidos = XLSX.utils.json_to_sheet(montarLinhasPlanilhaPedidos(lista));
+  const planilhaResumo = XLSX.utils.json_to_sheet(montarLinhasPlanilhaResumo(lista), { skipHeader: true });
+
+  const livro = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(livro, planilhaResumo, 'Resumo');
+  XLSX.utils.book_append_sheet(livro, planilhaPedidos, 'Pedidos');
+
+  const agora = new Date();
+  const carimbo = `${formatarISO(agora)}_${String(agora.getHours()).padStart(2, '0')}${String(agora.getMinutes()).padStart(2, '0')}`;
+  XLSX.writeFile(livro, `pedidos-sla-uniso_${carimbo}.xlsx`);
+}
+
+function configurarExtracaoExcel() {
+  const botao = document.getElementById('btnExtrairExcel');
+  if (!botao) return;
+  botao.addEventListener('click', exportarDadosParaExcel);
+}
+
+/* =========================================================================
    11. DADOS DE DEMONSTRAÇÃO (opcional, não executado automaticamente)
    -------------------------------------------------------------------------
    Esta função NÃO é chamada em lugar nenhum do carregamento automático do
@@ -2795,5 +2960,6 @@ configurarModalAtribuicaoFase();
 configurarFormularioInlineNovoPedido();
 configurarFormularioColaboradores();
 configurarFiltrosEBusca();
+configurarExtracaoExcel();
 renderizarTudo();
 carregarFirebaseEIniciar();
