@@ -498,6 +498,12 @@ async function salvarPedido(dadosFormulario, idExistente) {
     dataRecebimentoEstoque: dadosFormulario.dataRecebimentoEstoque,
     slaDias: Number(dadosFormulario.slaDias),
     dataVencimento,
+    // Quantidade de caixas do pedido (volumetria) - informada no cadastro e
+    // editável enquanto o pedido estiver aberto, igual aos demais campos
+    // acima. Não é a mesma coisa que o peso da carga (pesoCargaKg, abaixo),
+    // que só é conhecido depois de pesada na balança ao finalizar a
+    // Organização.
+    quantidadeCaixas: Number(dadosFormulario.quantidadeCaixas),
     observacao: String(dadosFormulario.observacao || '').trim()
   };
 
@@ -530,7 +536,12 @@ async function salvarPedido(dadosFormulario, idExistente) {
       operadorInicioOrganizacao: null,
       dataHoraInicioOrganizacao: null,
       operadorFimOrganizacao: null,
-      dataHoraFimOrganizacao: null
+      dataHoraFimOrganizacao: null,
+      // Peso aferido da carga (kg), informado na balança no momento de
+      // finalizar a Organização (ver finalizarOrganizacaoPedido). Fica nulo
+      // até lá; pedidos criados antes desta atualização também ficam nulos
+      // e são tratados como "não informado" em todos os cálculos/telas.
+      pesoCargaKg: null
     });
   }
 }
@@ -707,11 +718,16 @@ async function iniciarOrganizacaoPedido(pedido, nomeOperador) {
 // pedido automaticamente - sem precisar do "ticar" manual que existia
 // antes. A lógica de resultado do SLA (calcularResultadoFinalizacao) não
 // muda: continua comparando a data de hoje com o vencimento.
-async function finalizarOrganizacaoPedido(pedido, nomeOperador) {
+// pesoCargaKg: peso aferido na balança da carga já separada e organizada,
+// informado neste exato momento (tanto pelo modal ⏱️ quanto pelo atalho da
+// coluna "Atribuição" - ambos chamam esta mesma função, ver item 30 do
+// README). Obrigatório nos dois caminhos; validado antes de chegar aqui.
+async function finalizarOrganizacaoPedido(pedido, nomeOperador, pesoCargaKg) {
   await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
     statusOrganizacao: 'organizado',
     operadorFimOrganizacao: nomeOperador,
-    dataHoraFimOrganizacao: serverTimestamp()
+    dataHoraFimOrganizacao: serverTimestamp(),
+    pesoCargaKg: Number(pesoCargaKg)
   });
 
   if (pedido.statusSeparacao === 'separado' && pedido.status !== 'finalizado') {
@@ -1579,29 +1595,56 @@ function duracaoTotalMs(pedido) {
  * etapa (operadorFimSeparacao / operadorFimOrganizacao) - premissa adotada
  * porque, na prática, o mesmo operador normalmente inicia e finaliza a
  * própria etapa de um pedido.
+ *
+ * Também soma, para os mesmos pedidos (etapa concluída por aquele
+ * operador): o total de caixas (quantidadeCaixas, volumetria informada no
+ * cadastro do pedido) e - quando `somarPeso` é true (usado só para a
+ * Organização, onde o peso é de fato registrado) - o peso total aferido
+ * (pesoCargaKg). Pedidos sem quantidadeCaixas/pesoCargaKg (cadastrados
+ * antes desta atualização) são ignorados nessas somas, sem gerar erro.
  */
-function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao) {
+function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao, somarPeso = false) {
   const registros = lista
-    .map((pedido) => ({ operador: pedido[campoOperadorFim], duracao: funcaoDuracao(pedido) }))
+    .map((pedido) => ({
+      operador: pedido[campoOperadorFim],
+      duracao: funcaoDuracao(pedido),
+      caixas: pedido.quantidadeCaixas,
+      peso: pedido.pesoCargaKg
+    }))
     .filter((registro) => registro.operador && registro.duracao != null);
 
   const totalRegistros = registros.length;
   const porOperador = new Map();
-  registros.forEach(({ operador, duracao }) => {
-    if (!porOperador.has(operador)) porOperador.set(operador, { somaMs: 0, contagem: 0 });
+  registros.forEach(({ operador, duracao, caixas, peso }) => {
+    if (!porOperador.has(operador)) {
+      porOperador.set(operador, { somaMs: 0, contagem: 0, somaCaixas: 0, somaPeso: 0, temPeso: false });
+    }
     const acumulado = porOperador.get(operador);
     acumulado.somaMs += duracao;
     acumulado.contagem += 1;
+    if (typeof caixas === 'number' && !Number.isNaN(caixas)) acumulado.somaCaixas += caixas;
+    if (somarPeso && typeof peso === 'number' && !Number.isNaN(peso)) {
+      acumulado.somaPeso += peso;
+      acumulado.temPeso = true;
+    }
   });
 
   return Array.from(porOperador.entries())
-    .map(([operador, { somaMs, contagem }]) => ({
+    .map(([operador, { somaMs, contagem, somaCaixas, somaPeso, temPeso }]) => ({
       operador,
       tempoMedioMs: somaMs / contagem,
       quantidade: contagem,
-      percentual: totalRegistros > 0 ? Math.round((contagem / totalRegistros) * 100) : 0
+      percentual: totalRegistros > 0 ? Math.round((contagem / totalRegistros) * 100) : 0,
+      totalCaixas: somaCaixas,
+      totalPesoKg: temPeso ? somaPeso : null
     }))
     .sort((a, b) => b.quantidade - a.quantidade);
+}
+
+// Formata um peso em kg para exibição (1 casa decimal, separador brasileiro).
+function formatarPesoKg(valorKg) {
+  if (valorKg == null) return '-';
+  return `${valorKg.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 })} kg`;
 }
 
 function renderizarListaTemposOperador(idLista, idMensagemVazia, dados) {
@@ -1619,11 +1662,17 @@ function renderizarListaTemposOperador(idLista, idMensagemVazia, dados) {
   dados.forEach((item) => {
     const li = document.createElement('li');
     li.innerHTML = `
-      <span class="tempo-operador-nome">${item.operador}</span>
-      <span class="tempo-operador-metricas">
-        <span>${formatarDuracao(item.tempoMedioMs)}</span>
-        <span>${item.percentual}%</span>
-      </span>
+      <div class="tempo-operador-linha-principal">
+        <span class="tempo-operador-nome">${item.operador}</span>
+        <span class="tempo-operador-metricas">
+          <span>${formatarDuracao(item.tempoMedioMs)}</span>
+          <span>${item.percentual}%</span>
+        </span>
+      </div>
+      <div class="tempo-operador-linha-extra">
+        <span>${item.totalCaixas} cx</span>
+        ${item.totalPesoKg != null ? `<span>${formatarPesoKg(item.totalPesoKg)}</span>` : ''}
+      </div>
     `;
     lista.appendChild(li);
   });
@@ -1690,7 +1739,7 @@ function renderizarPainelTempos() {
   document.getElementById('tempoIndTaxaConclusao').textContent = `${taxaConclusao}%`;
 
   const temposSeparacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimSeparacao', duracaoSeparacaoMs);
-  const temposOrganizacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimOrganizacao', duracaoOrganizacaoMs);
+  const temposOrganizacao = calcularTemposPorOperador(estado.pedidos, 'operadorFimOrganizacao', duracaoOrganizacaoMs, true);
   renderizarListaTemposOperador('listaTemposSeparacao', 'mensagemVaziaTemposSeparacao', temposSeparacao);
   renderizarListaTemposOperador('listaTemposOrganizacao', 'mensagemVaziaTemposOrganizacao', temposOrganizacao);
 
@@ -1730,6 +1779,10 @@ function abrirModalEdicaoPedido(pedido) {
   document.getElementById('campoDataPedido').value = pedido.dataPedido;
   document.getElementById('campoDataRecebimento').value = pedido.dataRecebimentoEstoque;
   document.getElementById('campoSlaDias').value = pedido.slaDias;
+  // Pedidos cadastrados antes desta atualização não têm quantidadeCaixas
+  // gravada - fica em branco e, como o campo é obrigatório, a pessoa
+  // precisa preencher ao salvar (forma natural de completar o histórico).
+  document.getElementById('campoQuantidadeCaixas').value = pedido.quantidadeCaixas || '';
   document.getElementById('campoObservacao').value = pedido.observacao || '';
 
   // Correção manual dos registros de Separação e Organização (nome do
@@ -1744,6 +1797,7 @@ function abrirModalEdicaoPedido(pedido) {
   document.getElementById('campoEditarDataHoraInicioOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraInicioOrganizacao);
   popularSelectOperador('campoEditarOperadorFimOrganizacao', '(nenhum)', pedido.operadorFimOrganizacao || '');
   document.getElementById('campoEditarDataHoraFimOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimOrganizacao);
+  document.getElementById('campoEditarPesoCargaKg').value = pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '';
 
   atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento');
   document.getElementById('modalPedido').hidden = false;
@@ -1825,6 +1879,7 @@ function configurarModais() {
       dataPedido: document.getElementById('campoDataPedido').value,
       dataRecebimentoEstoque: document.getElementById('campoDataRecebimento').value,
       slaDias: document.getElementById('campoSlaDias').value,
+      quantidadeCaixas: document.getElementById('campoQuantidadeCaixas').value,
       observacao: document.getElementById('campoObservacao').value
     };
 
@@ -1834,7 +1889,9 @@ function configurarModais() {
       !dados.dataPedido ||
       !dados.dataRecebimentoEstoque ||
       !dados.slaDias ||
-      Number(dados.slaDias) <= 0;
+      Number(dados.slaDias) <= 0 ||
+      !dados.quantidadeCaixas ||
+      Number(dados.quantidadeCaixas) <= 0;
 
     if (invalido) {
       erro.textContent = 'Preencha todos os campos obrigatórios (marcados com *) com valores válidos.';
@@ -1900,12 +1957,17 @@ function configurarModais() {
       dataHoraFimSeparacao: fimSep.data,
       statusSeparacao: derivarStatusSeparacao(inicioSep.data, fimSep.data)
     };
+    // Peso da carga (kg): correção manual opcional, independente das
+    // marcações acima. Deixar em branco remove o valor (volta a "não
+    // informado"), igual ao padrão já usado para as demais correções.
+    const valorPesoCorrecao = document.getElementById('campoEditarPesoCargaKg').value;
     dados.registroOrganizacao = {
       operadorInicioOrganizacao: inicioOrg.nome,
       dataHoraInicioOrganizacao: inicioOrg.data,
       operadorFimOrganizacao: fimOrg.nome,
       dataHoraFimOrganizacao: fimOrg.data,
-      statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data)
+      statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data),
+      pesoCargaKg: valorPesoCorrecao === '' ? null : Number(valorPesoCorrecao)
     };
 
     // Reflete a correção na finalização automática do pedido: se as duas
@@ -2211,13 +2273,24 @@ function configurarModalSeparacao() {
       return;
     }
 
+    // Peso aferido da carga (kg): obrigatório só para finalizar (não para
+    // iniciar a organização) - ver item 30 do README.
+    const campoPesoOrg = document.getElementById('campoOrganizacaoPesoKg');
+    const pesoOrg = campoPesoOrg.value;
+    if (!pesoOrg || Number(pesoOrg) <= 0) {
+      erroOrg.textContent = 'Informe o peso aferido da carga (kg) na balança antes de finalizar a organização.';
+      erroOrg.hidden = false;
+      return;
+    }
+
     try {
-      await finalizarOrganizacaoPedido(pedido, nome);
+      await finalizarOrganizacaoPedido(pedido, nome, pesoOrg);
       sucessoOrg.textContent = pedido.statusSeparacao === 'separado'
         ? `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}. Pedido concluído automaticamente.`
         : `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
       sucessoOrg.hidden = false;
       campoNumeroOrg.value = '';
+      campoPesoOrg.value = '';
       campoNumeroOrg.focus();
     } catch (erroSalvar) {
       erroOrg.textContent = 'Erro ao registrar finalização da organização: ' + erroSalvar.message;
@@ -2267,6 +2340,8 @@ function configurarModalAtribuicaoFase() {
   const badgeFase = document.getElementById('badgeAtribuicaoFase');
   const rotuloColaborador = document.getElementById('rotuloAtribuicaoColaborador');
   const selectColaborador = document.getElementById('campoAtribuicaoColaborador');
+  const pesoWrapper = document.getElementById('campoAtribuicaoPesoWrapper');
+  const campoPeso = document.getElementById('campoAtribuicaoPesoKg');
   const nota = document.getElementById('notaAtribuicaoFase');
   const erro = document.getElementById('erroModalAtribuicaoFase');
   const btnConfirmar = document.getElementById('btnConfirmarAtribuicaoFase');
@@ -2328,6 +2403,12 @@ function configurarModalAtribuicaoFase() {
     badgeFase.textContent = ehSeparacao ? '📦 Fase 1 de 2 — Separação' : '🔨 Fase 2 de 2 — Organização (na mesa)';
     badgeFase.className = 'badge-fase ' + (ehSeparacao ? 'badge-fase-separacao' : 'badge-fase-organizacao');
 
+    // Peso aferido da carga: só aparece ao finalizar a Organização (mesmo
+    // campo e mesma obrigatoriedade do modal ⏱️ - ver item 30 do README).
+    const pedeOPeso = fase === 'organizacao' && acao === 'finalizar';
+    pesoWrapper.hidden = !pedeOPeso;
+    campoPeso.value = '';
+
     if (acao === 'atribuir') {
       titulo.textContent = ehSeparacao ? 'Atribuir Separação' : 'Atribuir Organização';
       rotuloColaborador.textContent = ehSeparacao ? 'Colaborador da Separação' : 'Colaborador da Organização';
@@ -2374,6 +2455,13 @@ function configurarModalAtribuicaoFase() {
       return;
     }
 
+    const finalizandoOrganizacao = faseAtribuicaoAtual === 'organizacao' && acaoAtribuicaoAtual === 'finalizar';
+    if (finalizandoOrganizacao && (!campoPeso.value || Number(campoPeso.value) <= 0)) {
+      erro.textContent = 'Informe o peso aferido da carga (kg) na balança antes de finalizar a organização.';
+      erro.hidden = false;
+      return;
+    }
+
     try {
       if (faseAtribuicaoAtual === 'separacao' && acaoAtribuicaoAtual === 'atribuir') {
         await iniciarSeparacaoPedido(pedidoAtual, nome);
@@ -2384,8 +2472,8 @@ function configurarModalAtribuicaoFase() {
       } else if (faseAtribuicaoAtual === 'organizacao' && acaoAtribuicaoAtual === 'atribuir') {
         await iniciarOrganizacaoPedido(pedidoAtual, nome);
         exibirAvisoAtribuicao('Organização atribuída.');
-      } else if (faseAtribuicaoAtual === 'organizacao' && acaoAtribuicaoAtual === 'finalizar') {
-        await finalizarOrganizacaoPedido(pedidoAtual, nome);
+      } else if (finalizandoOrganizacao) {
+        await finalizarOrganizacaoPedido(pedidoAtual, nome, campoPeso.value);
         exibirAvisoAtribuicao('Pedido finalizado e baixado.');
       }
       fecharModal();
@@ -2495,6 +2583,7 @@ function configurarFormularioInlineNovoPedido() {
       dataPedido: document.getElementById('inlineDataPedido').value,
       dataRecebimentoEstoque: document.getElementById('inlineDataRecebimento').value,
       slaDias: document.getElementById('inlineSlaDias').value,
+      quantidadeCaixas: document.getElementById('inlineQuantidadeCaixas').value,
       observacao: document.getElementById('inlineObservacao').value
     };
 
@@ -2504,10 +2593,12 @@ function configurarFormularioInlineNovoPedido() {
       !dados.dataPedido ||
       !dados.dataRecebimentoEstoque ||
       !dados.slaDias ||
-      Number(dados.slaDias) <= 0;
+      Number(dados.slaDias) <= 0 ||
+      !dados.quantidadeCaixas ||
+      Number(dados.quantidadeCaixas) <= 0;
 
     if (invalido) {
-      erro.textContent = 'Preencha Nº Pedido, Cliente, Data do Pedido, Rec. Estoque e SLA com valores válidos.';
+      erro.textContent = 'Preencha Nº Pedido, Cliente, Data do Pedido, Rec. Estoque, SLA e Qtde. de Caixas com valores válidos.';
       erro.hidden = false;
       return;
     }
@@ -2530,6 +2621,7 @@ function configurarFormularioInlineNovoPedido() {
       document.getElementById('inlineDataPedido').value = hojeISO();
       document.getElementById('inlineDataRecebimento').value = '';
       document.getElementById('inlineSlaDias').value = '';
+      document.getElementById('inlineQuantidadeCaixas').value = '';
       document.getElementById('inlineObservacao').value = '';
       atualizarPreviewVencimento('inlineDataRecebimento', 'inlineSlaDias', 'previewVencimentoInline');
       document.getElementById('inlineNumeroPedido').focus();
@@ -2795,6 +2887,7 @@ function montarLinhasPlanilhaPedidos(lista) {
     'Data Recebimento': formatarBR(pedido.dataRecebimentoEstoque),
     'SLA (dias úteis)': pedido.slaDias,
     'Data Vencimento': formatarBR(pedido.dataVencimento),
+    'Quantidade de Caixas': pedido.quantidadeCaixas != null ? pedido.quantidadeCaixas : '',
     Situação: situacaoParaPlanilha(pedido, pedido._classificacao),
     'Status do Pedido': pedido.status === 'finalizado' ? 'Finalizado' : 'Aberto',
     'Resultado do SLA': pedido.status === 'finalizado'
@@ -2815,6 +2908,7 @@ function montarLinhasPlanilhaPedidos(lista) {
     'Fim Organização': formatarDataHoraBrasilia(pedido.dataHoraFimOrganizacao),
     'Tempo de Organização': duracaoParaPlanilha(duracaoOrganizacaoMs(pedido)),
     'Tempo Total (Separação + Organização)': duracaoParaPlanilha(duracaoTotalMs(pedido)),
+    'Peso da Carga (kg)': pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '',
     Observação: pedido.observacao || ''
   }));
 }
@@ -2828,6 +2922,13 @@ function montarLinhasPlanilhaResumo(lista) {
   const noPrazo = finalizados.filter((p) => p.resultadoSLA === 'no_prazo').length;
   const atrasados = finalizados.filter((p) => p.resultadoSLA === 'atrasado').length;
 
+  // Volumetria (caixas) e peso: somados só sobre pedidos com o dado
+  // informado (pedidos antigos, sem quantidadeCaixas/pesoCargaKg, são
+  // ignorados nessa soma em vez de contar como zero).
+  const totalCaixas = lista.reduce((soma, p) => soma + (typeof p.quantidadeCaixas === 'number' ? p.quantidadeCaixas : 0), 0);
+  const pedidosComPeso = lista.filter((p) => typeof p.pesoCargaKg === 'number');
+  const totalPesoKg = pedidosComPeso.reduce((soma, p) => soma + p.pesoCargaKg, 0);
+
   const linhas = [
     { Indicador: 'Data de extração', Valor: formatarDataHoraBrasilia(new Date()) },
     { Indicador: 'Total de pedidos (nesta extração)', Valor: total },
@@ -2838,17 +2939,30 @@ function montarLinhasPlanilhaResumo(lista) {
     { Indicador: '— Dos finalizados: no prazo', Valor: noPrazo },
     { Indicador: '— Dos finalizados: atrasados', Valor: atrasados },
     { Indicador: '', Valor: '' },
+    { Indicador: 'Total de caixas (volumetria)', Valor: totalCaixas },
+    {
+      Indicador: 'Peso total aferido (kg)',
+      Valor: pedidosComPeso.length > 0 ? formatarPesoKg(totalPesoKg) : '- (nenhum pedido com peso registrado)'
+    },
+    { Indicador: '', Valor: '' },
     { Indicador: 'Tempo médio por operador — Separação', Valor: '' }
   ];
 
   calcularTemposPorOperador(lista, 'operadorFimSeparacao', duracaoSeparacaoMs).forEach((item) => {
-    linhas.push({ Indicador: `   ${item.operador}`, Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%)` });
+    linhas.push({
+      Indicador: `   ${item.operador}`,
+      Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%) — ${item.totalCaixas} cx`
+    });
   });
 
   linhas.push({ Indicador: '', Valor: '' });
   linhas.push({ Indicador: 'Tempo médio por operador — Organização', Valor: '' });
-  calcularTemposPorOperador(lista, 'operadorFimOrganizacao', duracaoOrganizacaoMs).forEach((item) => {
-    linhas.push({ Indicador: `   ${item.operador}`, Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%)` });
+  calcularTemposPorOperador(lista, 'operadorFimOrganizacao', duracaoOrganizacaoMs, true).forEach((item) => {
+    const sufixoPeso = item.totalPesoKg != null ? `, ${formatarPesoKg(item.totalPesoKg)}` : '';
+    linhas.push({
+      Indicador: `   ${item.operador}`,
+      Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%) — ${item.totalCaixas} cx${sufixoPeso}`
+    });
   });
 
   return linhas;
