@@ -76,7 +76,11 @@ Cada documento representa um pedido:
 | `dataHoraInicioOrganizacao`    | Timestamp (servidor) ou `null` | Data/hora de início da organização               |
 | `operadorFimOrganizacao`       | string \| `null`   | Nome digitado pelo operador ao finalizar a organização        |
 | `dataHoraFimOrganizacao`       | Timestamp (servidor) ou `null` | Data/hora de fim da organização                   |
-| `pesoCargaKg`                  | number \| `null`   | Peso aferido na balança (kg), informado apenas no momento de **finalizar a Organização** (2ª etapa). `null` até lá — não é obrigatório cubar, apenas pesar |
+| `pesoCargaKg`                  | number \| `null`   | Peso **total** aferido na balança (kg) de todas as caixas do pedido, informado apenas no momento de **finalizar a Organização** (2ª etapa). `null` até lá |
+| `alturaCm`                     | number \| `null`   | Altura (cm) da maior caixa/volume do pedido — mede-se só 1, não cada caixa (item 31). Informado junto com o peso, só ao finalizar a Organização |
+| `larguraCm`                    | number \| `null`   | Largura (cm) da maior caixa/volume do pedido (mesmas condições de `alturaCm`) |
+| `comprimentoCm`                | number \| `null`   | Comprimento (cm) da maior caixa/volume do pedido (mesmas condições de `alturaCm`) |
+| `pesoCubadoKg`                 | number \| `null`   | Peso cubado (kg), calculado automaticamente = Altura × Largura × Comprimento (m) × 300 (fator rodoviário Brasil). Nunca digitado diretamente — sempre recalculado a partir das 3 dimensões acima |
 
 > Nenhum valor de "dias restantes"/"dias de atraso" é armazenado — tudo é
 > calculado dinamicamente a cada renderização, comparando com a data atual.
@@ -96,6 +100,13 @@ Cada documento representa um pedido:
 > Painel de Tempos e das colunas de volumetria/peso do Excel até que o
 > pedido seja finalizado (ou reaberto e finalizado de novo) com o peso
 > informado. Nenhuma migração de dados é necessária.
+
+> Pelo mesmo motivo, pedidos finalizados antes do item 31 (seção 3) não têm
+> `alturaCm`/`larguraCm`/`comprimentoCm`/`pesoCubadoKg` gravados — ficam de
+> fora das somas de peso cubado do Painel de Tempos e da coluna "Peso
+> Cubado (kg)" do Excel até que alguém informe as dimensões (pela correção
+> manual em "Editar Pedido", já que o pedido já está finalizado e não passa
+> de novo pela tela de finalização). Nenhuma migração de dados é necessária.
 
 ## 2b. Modelo de dados (coleção `colaboradores`)
 
@@ -437,9 +448,11 @@ podem ser ajustadas depois, se necessário:
         peso aparece dinamicamente — oculto nas demais ações (Atribuir/
         Iniciar Separação, Atribuir/Iniciar Organização) e visível e
         obrigatório apenas na ação "Finalizar Organização".
-      - Por ora não é necessário cubar a carga (calcular volume em m³) —
-        apenas pesar na balança e informar o valor em quilogramas, conforme
-        solicitado.
+      - **Atualizado pelo item 31 abaixo:** a cubagem (altura/largura/
+        comprimento) passou a ser exigida junto com o peso neste mesmo
+        momento — a frase acima ("por ora não é necessário cubar") descreve
+        apenas o pedido original; o pedido de cubagem veio logo em seguida,
+        na mesma sessão de trabalho.
       - O valor é gravado no Firestore (`pesoCargaKg`) para fins de
         indicadores, e também pode ser corrigido manualmente em "Editar
         Pedido", na seção "Organização (correção manual)".
@@ -464,6 +477,49 @@ podem ser ajustadas depois, se necessário:
       pendência.
     - Pedidos antigos sem `quantidadeCaixas`/`pesoCargaKg` são tratados sem
       quebrar nada — ver nota na seção 2.
+
+31. **Cubagem da carga e cálculo automático do peso cubado** (adicionado
+    nesta atualização, em sequência ao item 30):
+    - **Altura, Largura e Comprimento (cm):** três novos campos, exigidos
+      exatamente no mesmo momento e nos mesmos dois caminhos que o Peso da
+      Carga (item 30) — ao "Finalizar Organização", tanto no modal "⏱️
+      Registro de Separação e Organização" quanto na coluna "Atribuição".
+      Também podem ser corrigidos manualmente em "Editar Pedido", na seção
+      "Organização (correção manual)".
+    - **Mede-se apenas 1 volume — o maior** caixa/volume do pedido — e não
+      cada caixa individualmente, nem multiplicado pela Quantidade de
+      Caixas (item 30). O Peso da Carga continua sendo o peso **total** de
+      todas as caixas declaradas no pedido; a cubagem é só uma referência
+      dimensional de uma caixa/volume representativa.
+    - **Peso cubado (kg):** calculado automaticamente a partir das três
+      dimensões, com o fator padrão de transporte rodoviário de cargas no
+      Brasil (NTC&Logística/ANTT): **peso cubado = Altura × Largura ×
+      Comprimento (em metros) × 300**. Uma prévia do valor calculado
+      aparece ao vivo, abaixo dos campos, conforme as dimensões são
+      digitadas (nos dois caminhos e também na correção manual) — antes
+      mesmo de finalizar/salvar.
+    - Gravado no Firestore como `alturaCm`, `larguraCm`, `comprimentoCm` e
+      `pesoCubadoKg` (este último sempre recalculado a partir dos três
+      primeiros, nunca digitado diretamente).
+    - **Painel de Tempos:** a lista "Tempo Médio por Operador" (Organização)
+      passou a exibir também o peso cubado total somado por colaborador
+      (`X,X kg cubado`), ao lado do peso real já existente.
+    - **Extração em Excel:** a aba "Pedidos" ganhou as colunas "Altura
+      (cm)", "Largura (cm)", "Comprimento (cm)" e "Peso Cubado (kg)"; a aba
+      "Resumo" ganhou o indicador "Peso cubado total (kg)", e a linha de
+      tempo médio por operador da Organização passou a mostrar também o
+      peso cubado total ao lado do peso real.
+    - **Premissa adotada (fator de cubagem):** como o segmento de atuação
+      (transporte/logística rodoviária) não foi informado com um fator
+      específico de contrato, foi adotado o fator padrão do mercado
+      rodoviário brasileiro — 300 kg/m³ — confirmado com o solicitante antes
+      da implementação. Se a transportadora usada tiver um fator contratual
+      diferente (ex.: aéreo, 166,67 kg/m³, ou outro valor específico), o
+      fator está isolado em uma única constante no código
+      (`FATOR_CUBAGEM_KG_M3`, em `app.js`), fácil de ajustar sem tocar no
+      resto da lógica.
+    - Pedidos antigos sem cubagem registrada são tratados sem quebrar nada,
+      mesmo padrão do Peso da Carga (ver nota na seção 2).
 
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
@@ -667,6 +723,34 @@ firebase deploy
     o atributo `hidden` continue escondendo visualmente o campo — e os
     testes automatizados confirmaram que o campo de peso realmente fica
     oculto/visível conforme esperado.
+- **Cubagem e peso cubado (item 31):** testes automatizados (Playwright,
+  com o Firestore simulado) cobrindo: no modal "⏱️ Registro de Separação e
+  Organização", bloqueio de "Finalizar Organização" quando o peso está
+  preenchido mas a cubagem (altura/largura/comprimento) não está (mensagem
+  de erro específica); prévia ao vivo do peso cubado calculando corretamente
+  (0,5 × 0,4 × 0,6 m × 300 = 36 kg) conforme as dimensões são digitadas,
+  antes mesmo de finalizar; gravação correta das 3 dimensões e do peso
+  cubado calculado no Firestore ao finalizar, mantendo o peso real intacto;
+  na coluna "Atribuição", os 3 campos de cubagem aparecendo apenas no passo
+  "Finalizar Organização", com o mesmo bloqueio e a mesma prévia ao vivo
+  (0,6 × 0,5 × 0,8 m × 300 = 72 kg), e gravação correta; em "Editar Pedido",
+  exibição do peso cubado já gravado ao abrir, recálculo ao vivo da prévia
+  ao corrigir as dimensões manualmente (1 × 1 × 1 m × 300 = 300 kg) e
+  gravação correta da correção; Painel de Tempos somando corretamente o
+  peso cubado total por colaborador na lista de Organização (testado com 3
+  pedidos de um mesmo colaborador, soma = 36 + 72 + 300 = 408 kg); extração
+  em Excel contendo as novas colunas "Altura (cm)", "Largura (cm)",
+  "Comprimento (cm)" e "Peso Cubado (kg)" na aba "Pedidos" com os valores
+  corretos, e o novo indicador "Peso cubado total (kg)" na aba "Resumo"; e
+  regressão confirmando que a obrigatoriedade da Quantidade de Caixas (item
+  30) continua funcionando. Zero erros JavaScript não tratados em todos os
+  cenários.
+  - Como a cubagem passou a ser obrigatória junto com o peso ao finalizar a
+    Organização, os testes automatizados do item 30 (acima) foram
+    atualizados para também preencher altura/largura/comprimento nos
+    cenários de finalização — sem isso, eles passariam a ficar bloqueados
+    pela nova validação. Reexecutados e confirmados passando normalmente
+    após o ajuste.
 - **A integração real com o Firebase em produção não foi testada nesta
   sessão** (o ambiente de desenvolvimento não tem acesso à internet para
   isso) — os testes acima usam um Firestore simulado. Após publicar estes
