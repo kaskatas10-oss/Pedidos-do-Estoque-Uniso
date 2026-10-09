@@ -498,12 +498,14 @@ async function salvarPedido(dadosFormulario, idExistente) {
     dataRecebimentoEstoque: dadosFormulario.dataRecebimentoEstoque,
     slaDias: Number(dadosFormulario.slaDias),
     dataVencimento,
-    // Quantidade de caixas do pedido (volumetria) - informada no cadastro e
-    // editável enquanto o pedido estiver aberto, igual aos demais campos
-    // acima. Não é a mesma coisa que o peso da carga (pesoCargaKg, abaixo),
-    // que só é conhecido depois de pesada na balança ao finalizar a
-    // Organização.
-    quantidadeCaixas: Number(dadosFormulario.quantidadeCaixas),
+    // Quantidade de ITENS do pedido - informada no cadastro e editável
+    // enquanto o pedido estiver aberto, igual aos demais campos acima. NÃO É
+    // a quantidade de caixas (ver quantidadeCaixas, abaixo): itens é o que
+    // se sabe no momento do lançamento do pedido; a quantidade de caixas só
+    // é conhecida depois de fechadas, ao finalizar a Organização - a
+    // separação busca os produtos e embala, a identificação final de caixas
+    // é feita na Organização (item 32 do README).
+    quantidadeItens: Number(dadosFormulario.quantidadeItens),
     observacao: String(dadosFormulario.observacao || '').trim()
   };
 
@@ -542,6 +544,11 @@ async function salvarPedido(dadosFormulario, idExistente) {
       // até lá; pedidos criados antes desta atualização também ficam nulos
       // e são tratados como "não informado" em todos os cálculos/telas.
       pesoCargaKg: null,
+      // Quantidade de CAIXAS (fechada/final), informada apenas ao finalizar
+      // a Organização - diferente de quantidadeItens (acima), que é
+      // informada no cadastro do pedido. Fica nula até lá (item 32 do
+      // README).
+      quantidadeCaixas: null,
       // Cubagem (cm) da maior caixa/volume do pedido e o peso cubado (kg)
       // calculado a partir dela, informados junto com o peso ao finalizar a
       // Organização (ver calcularPesoCubado e item 31 do README). Ficam
@@ -751,15 +758,20 @@ async function iniciarOrganizacaoPedido(pedido, nomeOperador) {
 // informado neste exato momento (tanto pelo modal ⏱️ quanto pelo atalho da
 // coluna "Atribuição" - ambos chamam esta mesma função, ver item 30 do
 // README). Obrigatório nos dois caminhos; validado antes de chegar aqui.
+// quantidadeCaixas: quantidade FECHADA de caixas (contagem final, depois de
+// embaladas), também informada neste momento nos dois caminhos (item 32 do
+// README) - diferente de quantidadeItens, informada no cadastro do pedido.
 // alturaCm/larguraCm/comprimentoCm: dimensões (cm) da maior caixa/volume do
 // pedido, também informadas neste momento nos dois caminhos (item 31 do
-// README); pesoCubadoKg é calculado automaticamente a partir delas.
-async function finalizarOrganizacaoPedido(pedido, nomeOperador, pesoCargaKg, alturaCm, larguraCm, comprimentoCm) {
+// README); pesoCubadoKg é calculado automaticamente a partir delas (sem
+// multiplicar pela quantidade de caixas - ver item 31).
+async function finalizarOrganizacaoPedido(pedido, nomeOperador, pesoCargaKg, quantidadeCaixas, alturaCm, larguraCm, comprimentoCm) {
   await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
     statusOrganizacao: 'organizado',
     operadorFimOrganizacao: nomeOperador,
     dataHoraFimOrganizacao: serverTimestamp(),
     pesoCargaKg: Number(pesoCargaKg),
+    quantidadeCaixas: Number(quantidadeCaixas),
     alturaCm: Number(alturaCm),
     larguraCm: Number(larguraCm),
     comprimentoCm: Number(comprimentoCm),
@@ -1633,13 +1645,22 @@ function duracaoTotalMs(pedido) {
  * própria etapa de um pedido.
  *
  * Também soma, para os mesmos pedidos (etapa concluída por aquele
- * operador): o total de caixas (quantidadeCaixas, volumetria informada no
- * cadastro do pedido) e - quando `somarPeso` é true (usado só para a
- * Organização, onde o peso e a cubagem são de fato registrados) - o peso
- * total aferido (pesoCargaKg) e o peso cubado total (pesoCubadoKg, somando
- * o peso cubado de cada pedido - item 31 do README). Pedidos sem
- * quantidadeCaixas/pesoCargaKg/pesoCubadoKg (cadastrados antes desta
- * atualização) são ignorados nessas somas, sem gerar erro.
+ * operador): o total de caixas (quantidadeCaixas) e - quando `somarPeso` é
+ * true (usado só para a Organização, onde o peso e a cubagem são de fato
+ * registrados) - o peso total aferido (pesoCargaKg) e o peso cubado total
+ * (pesoCubadoKg, somando o peso cubado de cada pedido - item 31 do README).
+ * Pedidos sem quantidadeCaixas/pesoCargaKg/pesoCubadoKg (cadastrados antes
+ * desta atualização, ou cuja Organização ainda não foi finalizada) são
+ * ignorados nessas somas, sem gerar erro.
+ *
+ * Desde o item 32 do README, quantidadeCaixas passou a significar a
+ * quantidade FECHADA de caixas, informada apenas ao finalizar a
+ * Organização (não mais a quantidade lançada no cadastro do pedido, que
+ * agora é o campo separado quantidadeItens). Por isso "caixas" aparece
+ * tanto na lista de Separação quanto na de Organização deste painel, mas
+ * só é contabilizado - em qualquer uma das duas listas - depois que a
+ * Organização daquele pedido for finalizada; pedidos ainda em separação
+ * ou em organização aparecem com 0 caixas até lá.
  */
 function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao, somarPeso = false) {
   const registros = lista
@@ -1824,10 +1845,14 @@ function abrirModalEdicaoPedido(pedido) {
   document.getElementById('campoDataPedido').value = pedido.dataPedido;
   document.getElementById('campoDataRecebimento').value = pedido.dataRecebimentoEstoque;
   document.getElementById('campoSlaDias').value = pedido.slaDias;
-  // Pedidos cadastrados antes desta atualização não têm quantidadeCaixas
-  // gravada - fica em branco e, como o campo é obrigatório, a pessoa
-  // precisa preencher ao salvar (forma natural de completar o histórico).
-  document.getElementById('campoQuantidadeCaixas').value = pedido.quantidadeCaixas || '';
+  // Pedidos cadastrados antes do item 32 (README) têm o dado antigo gravado
+  // no campo quantidadeCaixas (que, à época, significava a mesma coisa que
+  // quantidadeItens agora) - usa-o como fallback só para não perder o
+  // histórico já digitado. Pedidos sem nenhum dos dois ficam em branco e,
+  // como o campo é obrigatório, a pessoa precisa preencher ao salvar.
+  document.getElementById('campoQuantidadeItens').value = pedido.quantidadeItens != null
+    ? pedido.quantidadeItens
+    : (pedido.quantidadeCaixas || '');
   document.getElementById('campoObservacao').value = pedido.observacao || '';
 
   // Correção manual dos registros de Separação e Organização (nome do
@@ -1843,6 +1868,11 @@ function abrirModalEdicaoPedido(pedido) {
   popularSelectOperador('campoEditarOperadorFimOrganizacao', '(nenhum)', pedido.operadorFimOrganizacao || '');
   document.getElementById('campoEditarDataHoraFimOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimOrganizacao);
   document.getElementById('campoEditarPesoCargaKg').value = pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '';
+  // quantidadeCaixas aqui é sempre a quantidade FECHADA, informada só ao
+  // finalizar a Organização (item 32) - diferente do fallback usado acima
+  // para quantidadeItens, pois pedidos anteriores ao item 32 nunca tiveram
+  // esse dado com esse significado.
+  document.getElementById('campoEditarQuantidadeCaixas').value = pedido.quantidadeCaixas != null ? pedido.quantidadeCaixas : '';
   document.getElementById('campoEditarAlturaCm').value = pedido.alturaCm != null ? pedido.alturaCm : '';
   document.getElementById('campoEditarLarguraCm').value = pedido.larguraCm != null ? pedido.larguraCm : '';
   document.getElementById('campoEditarComprimentoCm').value = pedido.comprimentoCm != null ? pedido.comprimentoCm : '';
@@ -1940,7 +1970,7 @@ function configurarModais() {
       dataPedido: document.getElementById('campoDataPedido').value,
       dataRecebimentoEstoque: document.getElementById('campoDataRecebimento').value,
       slaDias: document.getElementById('campoSlaDias').value,
-      quantidadeCaixas: document.getElementById('campoQuantidadeCaixas').value,
+      quantidadeItens: document.getElementById('campoQuantidadeItens').value,
       observacao: document.getElementById('campoObservacao').value
     };
 
@@ -1951,8 +1981,8 @@ function configurarModais() {
       !dados.dataRecebimentoEstoque ||
       !dados.slaDias ||
       Number(dados.slaDias) <= 0 ||
-      !dados.quantidadeCaixas ||
-      Number(dados.quantidadeCaixas) <= 0;
+      !dados.quantidadeItens ||
+      Number(dados.quantidadeItens) <= 0;
 
     if (invalido) {
       erro.textContent = 'Preencha todos os campos obrigatórios (marcados com *) com valores válidos.';
@@ -2025,6 +2055,7 @@ function configurarModais() {
     // peso cubado só é recalculado quando as 3 dimensões estão preenchidas;
     // se faltar alguma, fica null (mesmo padrão do peso).
     const valorPesoCorrecao = document.getElementById('campoEditarPesoCargaKg').value;
+    const valorQtdCaixasCorrecao = document.getElementById('campoEditarQuantidadeCaixas').value;
     const valorAlturaCorrecao = document.getElementById('campoEditarAlturaCm').value;
     const valorLarguraCorrecao = document.getElementById('campoEditarLarguraCm').value;
     const valorComprimentoCorrecao = document.getElementById('campoEditarComprimentoCm').value;
@@ -2035,6 +2066,7 @@ function configurarModais() {
       dataHoraFimOrganizacao: fimOrg.data,
       statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data),
       pesoCargaKg: valorPesoCorrecao === '' ? null : Number(valorPesoCorrecao),
+      quantidadeCaixas: valorQtdCaixasCorrecao === '' ? null : Number(valorQtdCaixasCorrecao),
       alturaCm: valorAlturaCorrecao === '' ? null : Number(valorAlturaCorrecao),
       larguraCm: valorLarguraCorrecao === '' ? null : Number(valorLarguraCorrecao),
       comprimentoCm: valorComprimentoCorrecao === '' ? null : Number(valorComprimentoCorrecao),
@@ -2344,16 +2376,23 @@ function configurarModalSeparacao() {
       return;
     }
 
-    // Peso aferido da carga (kg) e cubagem (altura/largura/comprimento, cm,
-    // da maior caixa/volume): obrigatórios só para finalizar (não para
-    // iniciar a organização) - ver itens 30 e 31 do README.
+    // Peso aferido da carga (kg), Quantidade de Caixas (fechada) e cubagem
+    // (altura/largura/comprimento, cm, da maior caixa/volume): obrigatórios
+    // só para finalizar (não para iniciar a organização) - ver itens 30, 31
+    // e 32 do README.
     const campoPesoOrg = document.getElementById('campoOrganizacaoPesoKg');
+    const campoQtdCaixasOrg = document.getElementById('campoOrganizacaoQuantidadeCaixas');
     const campoAlturaOrg = document.getElementById('campoOrganizacaoAlturaCm');
     const campoLarguraOrg = document.getElementById('campoOrganizacaoLarguraCm');
     const campoComprimentoOrg = document.getElementById('campoOrganizacaoComprimentoCm');
     const pesoOrg = campoPesoOrg.value;
     if (!pesoOrg || Number(pesoOrg) <= 0) {
       erroOrg.textContent = 'Informe o peso aferido da carga (kg) na balança antes de finalizar a organização.';
+      erroOrg.hidden = false;
+      return;
+    }
+    if (!campoQtdCaixasOrg.value || Number(campoQtdCaixasOrg.value) <= 0) {
+      erroOrg.textContent = 'Informe a quantidade de caixas (já fechadas) antes de finalizar a organização.';
       erroOrg.hidden = false;
       return;
     }
@@ -2365,13 +2404,14 @@ function configurarModalSeparacao() {
     }
 
     try {
-      await finalizarOrganizacaoPedido(pedido, nome, pesoOrg, campoAlturaOrg.value, campoLarguraOrg.value, campoComprimentoOrg.value);
+      await finalizarOrganizacaoPedido(pedido, nome, pesoOrg, campoQtdCaixasOrg.value, campoAlturaOrg.value, campoLarguraOrg.value, campoComprimentoOrg.value);
       sucessoOrg.textContent = pedido.statusSeparacao === 'separado'
         ? `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}. Pedido concluído automaticamente.`
         : `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
       sucessoOrg.hidden = false;
       campoNumeroOrg.value = '';
       campoPesoOrg.value = '';
+      campoQtdCaixasOrg.value = '';
       campoAlturaOrg.value = '';
       campoLarguraOrg.value = '';
       campoComprimentoOrg.value = '';
@@ -2441,6 +2481,8 @@ function configurarModalAtribuicaoFase() {
   const selectColaborador = document.getElementById('campoAtribuicaoColaborador');
   const pesoWrapper = document.getElementById('campoAtribuicaoPesoWrapper');
   const campoPeso = document.getElementById('campoAtribuicaoPesoKg');
+  const qtdCaixasWrapper = document.getElementById('campoAtribuicaoQuantidadeCaixasWrapper');
+  const campoQtdCaixas = document.getElementById('campoAtribuicaoQuantidadeCaixas');
   const alturaWrapper = document.getElementById('campoAtribuicaoAlturaWrapper');
   const campoAltura = document.getElementById('campoAtribuicaoAlturaCm');
   const larguraWrapper = document.getElementById('campoAtribuicaoLarguraWrapper');
@@ -2509,12 +2551,15 @@ function configurarModalAtribuicaoFase() {
     badgeFase.textContent = ehSeparacao ? '📦 Fase 1 de 2 — Separação' : '🔨 Fase 2 de 2 — Organização (na mesa)';
     badgeFase.className = 'badge-fase ' + (ehSeparacao ? 'badge-fase-separacao' : 'badge-fase-organizacao');
 
-    // Peso aferido da carga e cubagem (altura/largura/comprimento): só
-    // aparecem ao finalizar a Organização (mesmos campos e mesma
-    // obrigatoriedade do modal ⏱️ - ver itens 30 e 31 do README).
+    // Peso aferido da carga, Quantidade de Caixas (fechada) e cubagem
+    // (altura/largura/comprimento): só aparecem ao finalizar a Organização
+    // (mesmos campos e mesma obrigatoriedade do modal ⏱️ - ver itens 30, 31
+    // e 32 do README).
     const pedeOPeso = fase === 'organizacao' && acao === 'finalizar';
     pesoWrapper.hidden = !pedeOPeso;
     campoPeso.value = '';
+    qtdCaixasWrapper.hidden = !pedeOPeso;
+    campoQtdCaixas.value = '';
     alturaWrapper.hidden = !pedeOPeso;
     larguraWrapper.hidden = !pedeOPeso;
     comprimentoWrapper.hidden = !pedeOPeso;
@@ -2585,6 +2630,11 @@ function configurarModalAtribuicaoFase() {
       erro.hidden = false;
       return;
     }
+    if (finalizandoOrganizacao && (!campoQtdCaixas.value || Number(campoQtdCaixas.value) <= 0)) {
+      erro.textContent = 'Informe a quantidade de caixas (já fechadas) antes de finalizar a organização.';
+      erro.hidden = false;
+      return;
+    }
     if (finalizandoOrganizacao && (!campoAltura.value || !campoLargura.value || !campoComprimento.value
       || Number(campoAltura.value) <= 0 || Number(campoLargura.value) <= 0 || Number(campoComprimento.value) <= 0)) {
       erro.textContent = 'Informe a altura, largura e comprimento (cm) da maior caixa/volume antes de finalizar a organização.';
@@ -2603,7 +2653,7 @@ function configurarModalAtribuicaoFase() {
         await iniciarOrganizacaoPedido(pedidoAtual, nome);
         exibirAvisoAtribuicao('Organização atribuída.');
       } else if (finalizandoOrganizacao) {
-        await finalizarOrganizacaoPedido(pedidoAtual, nome, campoPeso.value, campoAltura.value, campoLargura.value, campoComprimento.value);
+        await finalizarOrganizacaoPedido(pedidoAtual, nome, campoPeso.value, campoQtdCaixas.value, campoAltura.value, campoLargura.value, campoComprimento.value);
         exibirAvisoAtribuicao('Pedido finalizado e baixado.');
       }
       fecharModal();
@@ -2713,7 +2763,7 @@ function configurarFormularioInlineNovoPedido() {
       dataPedido: document.getElementById('inlineDataPedido').value,
       dataRecebimentoEstoque: document.getElementById('inlineDataRecebimento').value,
       slaDias: document.getElementById('inlineSlaDias').value,
-      quantidadeCaixas: document.getElementById('inlineQuantidadeCaixas').value,
+      quantidadeItens: document.getElementById('inlineQuantidadeItens').value,
       observacao: document.getElementById('inlineObservacao').value
     };
 
@@ -2724,11 +2774,11 @@ function configurarFormularioInlineNovoPedido() {
       !dados.dataRecebimentoEstoque ||
       !dados.slaDias ||
       Number(dados.slaDias) <= 0 ||
-      !dados.quantidadeCaixas ||
-      Number(dados.quantidadeCaixas) <= 0;
+      !dados.quantidadeItens ||
+      Number(dados.quantidadeItens) <= 0;
 
     if (invalido) {
-      erro.textContent = 'Preencha Nº Pedido, Cliente, Data do Pedido, Rec. Estoque, SLA e Qtde. de Caixas com valores válidos.';
+      erro.textContent = 'Preencha Nº Pedido, Cliente, Data do Pedido, Rec. Estoque, SLA e Quant. Itens com valores válidos.';
       erro.hidden = false;
       return;
     }
@@ -2751,7 +2801,7 @@ function configurarFormularioInlineNovoPedido() {
       document.getElementById('inlineDataPedido').value = hojeISO();
       document.getElementById('inlineDataRecebimento').value = '';
       document.getElementById('inlineSlaDias').value = '';
-      document.getElementById('inlineQuantidadeCaixas').value = '';
+      document.getElementById('inlineQuantidadeItens').value = '';
       document.getElementById('inlineObservacao').value = '';
       atualizarPreviewVencimento('inlineDataRecebimento', 'inlineSlaDias', 'previewVencimentoInline');
       document.getElementById('inlineNumeroPedido').focus();
@@ -3017,7 +3067,7 @@ function montarLinhasPlanilhaPedidos(lista) {
     'Data Recebimento': formatarBR(pedido.dataRecebimentoEstoque),
     'SLA (dias úteis)': pedido.slaDias,
     'Data Vencimento': formatarBR(pedido.dataVencimento),
-    'Quantidade de Caixas': pedido.quantidadeCaixas != null ? pedido.quantidadeCaixas : '',
+    'Quantidade de Itens': pedido.quantidadeItens != null ? pedido.quantidadeItens : '',
     Situação: situacaoParaPlanilha(pedido, pedido._classificacao),
     'Status do Pedido': pedido.status === 'finalizado' ? 'Finalizado' : 'Aberto',
     'Resultado do SLA': pedido.status === 'finalizado'
@@ -3039,6 +3089,7 @@ function montarLinhasPlanilhaPedidos(lista) {
     'Tempo de Organização': duracaoParaPlanilha(duracaoOrganizacaoMs(pedido)),
     'Tempo Total (Separação + Organização)': duracaoParaPlanilha(duracaoTotalMs(pedido)),
     'Peso da Carga (kg)': pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '',
+    'Quantidade de Caixas (fechada)': pedido.quantidadeCaixas != null ? pedido.quantidadeCaixas : '',
     'Altura (cm)': pedido.alturaCm != null ? pedido.alturaCm : '',
     'Largura (cm)': pedido.larguraCm != null ? pedido.larguraCm : '',
     'Comprimento (cm)': pedido.comprimentoCm != null ? pedido.comprimentoCm : '',
@@ -3056,9 +3107,12 @@ function montarLinhasPlanilhaResumo(lista) {
   const noPrazo = finalizados.filter((p) => p.resultadoSLA === 'no_prazo').length;
   const atrasados = finalizados.filter((p) => p.resultadoSLA === 'atrasado').length;
 
-  // Volumetria (caixas), peso e peso cubado: somados só sobre pedidos com o
-  // dado informado (pedidos antigos, sem quantidadeCaixas/pesoCargaKg/
-  // pesoCubadoKg, são ignorados nessa soma em vez de contar como zero).
+  // Volumetria (itens no cadastro + caixas fechadas na Organização), peso e
+  // peso cubado: somados só sobre pedidos com o dado informado (pedidos sem
+  // quantidadeItens/quantidadeCaixas/pesoCargaKg/pesoCubadoKg - seja por
+  // serem antigos, seja por a etapa correspondente ainda não ter sido
+  // finalizada - são ignorados nessa soma em vez de contar como zero).
+  const totalItens = lista.reduce((soma, p) => soma + (typeof p.quantidadeItens === 'number' ? p.quantidadeItens : 0), 0);
   const totalCaixas = lista.reduce((soma, p) => soma + (typeof p.quantidadeCaixas === 'number' ? p.quantidadeCaixas : 0), 0);
   const pedidosComPeso = lista.filter((p) => typeof p.pesoCargaKg === 'number');
   const totalPesoKg = pedidosComPeso.reduce((soma, p) => soma + p.pesoCargaKg, 0);
@@ -3075,7 +3129,8 @@ function montarLinhasPlanilhaResumo(lista) {
     { Indicador: '— Dos finalizados: no prazo', Valor: noPrazo },
     { Indicador: '— Dos finalizados: atrasados', Valor: atrasados },
     { Indicador: '', Valor: '' },
-    { Indicador: 'Total de caixas (volumetria)', Valor: totalCaixas },
+    { Indicador: 'Total de itens cadastrados (lançamento do pedido)', Valor: totalItens },
+    { Indicador: 'Total de caixas fechadas (volumetria - Organização)', Valor: totalCaixas },
     {
       Indicador: 'Peso total aferido (kg)',
       Valor: pedidosComPeso.length > 0 ? formatarPesoKg(totalPesoKg) : '- (nenhum pedido com peso registrado)'
