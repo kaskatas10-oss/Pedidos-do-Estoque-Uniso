@@ -59,7 +59,8 @@ Cada documento representa um pedido:
 | `dataRecebimentoEstoque`       | string `yyyy-mm-dd`| Data de recebimento no estoque                            |
 | `slaDias`                      | number             | Prazo de SLA em **dias úteis**                            |
 | `dataVencimento`               | string `yyyy-mm-dd`| Calculada automaticamente (recebimento + SLA em dias úteis) |
-| `quantidadeCaixas`             | number             | Volumetria do pedido — quantidade de caixas informada no cadastro (obrigatório). Pedidos criados antes desta atualização podem não ter este campo (ver nota abaixo) |
+| `quantidadeItens`              | number             | Quantidade de itens informada no **cadastro do pedido** (obrigatório) — a separação busca os produtos/embalagens com base nela. Até o item 31, este dado ficava no campo `quantidadeCaixas` (ver nota sobre o item 32 abaixo); renomeado para não se confundir com a contagem final de caixas abaixo |
+| `quantidadeCaixas`             | number \| `null`   | Quantidade **final de caixas já fechadas**, informada apenas ao **finalizar a Organização** (2ª etapa) — distinta de `quantidadeItens` acima, pois só depois de organizar/embalar é que se sabe em quantas caixas o pedido ficou fechado (item 32). `null` até a Organização ser finalizada |
 | `observacao`                   | string             | Texto livre                                              |
 | `status`                       | `"aberto"` \| `"finalizado"` | Único estado controlado (sem "em análise"/"cancelado") |
 | `criadoEm`                     | Timestamp (servidor)| Data/hora de criação                                     |
@@ -107,6 +108,23 @@ Cada documento representa um pedido:
 > Cubado (kg)" do Excel até que alguém informe as dimensões (pela correção
 > manual em "Editar Pedido", já que o pedido já está finalizado e não passa
 > de novo pela tela de finalização). Nenhuma migração de dados é necessária.
+
+> **Sobre a renomeação do item 32:** pedidos cadastrados **antes** do item 32
+> têm a quantidade do cadastro gravada no campo `quantidadeCaixas` (nome
+> antigo do que hoje é `quantidadeItens`). Ao abrir um desses pedidos em
+> "Editar Pedido", o campo "Quantidade de Itens\*" usa esse valor antigo como
+> aproveitamento automático (`quantidadeItens ?? quantidadeCaixas`), só para
+> não aparecer em branco — não há perda de dado nem migração necessária. Essa
+> mesma aproximação, porém, não é feita no sentido contrário: o campo
+> "Quantidade de Caixas (fechada)" de Editar Pedido lê somente o valor atual
+> de `quantidadeCaixas`, então, para esses pedidos antigos, ele só mostra
+> algo se a Organização já tiver sido finalizada **depois** da entrada em
+> vigor do item 32 (antes disso, era o mesmo campo usado para a quantidade do
+> cadastro — por isso não é reaproveitado automaticamente como quantidade
+> fechada). Na prática, isso não afetou nenhum pedido real: antes desta
+> atualização, o campo `quantidadeCaixas` nunca chegou a ser preenchido em
+> produção (confirmado pelo Painel de Tempos, que mostrava "0 cx" para todos
+> os colaboradores).
 
 ## 2b. Modelo de dados (coleção `colaboradores`)
 
@@ -521,6 +539,63 @@ podem ser ajustadas depois, se necessário:
     - Pedidos antigos sem cubagem registrada são tratados sem quebrar nada,
       mesmo padrão do Peso da Carga (ver nota na seção 2).
 
+32. **Separação entre Quantidade de Itens (cadastro) e Quantidade de Caixas
+    fechada (Organização)** (adicionado nesta atualização, em sequência aos
+    itens 30 e 31):
+    - **Motivação:** o campo único "Quantidade de Caixas" criado no item 30
+      era lançado no **cadastro** do pedido, antes de a separação e a
+      organização acontecerem. Na prática, porém, a separação apenas busca
+      os produtos/embalagens — é só na **Organização** (ao fechar as caixas
+      para despacho) que a quantidade final de caixas é conhecida de fato.
+      Por isso o campo foi dividido em dois, cada um no momento certo do
+      processo:
+      - **Quantidade de Itens** (`quantidadeItens`): o campo antigo,
+        renomeado — continua sendo informado no **cadastro do pedido**
+        (rótulo "Quant. Itens" em "Adicionar Novo Pedido", "Quantidade de
+        Itens\*" em "Editar Pedido"), obrigatório, com a mesma validação de
+        antes.
+      - **Quantidade de Caixas** (`quantidadeCaixas`): campo **novo**,
+        reaproveitando o nome antigo do campo do item 30, mas agora com um
+        significado mais preciso — a quantidade **final de caixas já
+        fechadas**, informada apenas ao **Finalizar a Organização**, nos
+        mesmos dois caminhos do Peso da Carga e da cubagem (itens 30 e 31):
+        o modal "⏱️ Registro de Separação e Organização" (campo
+        "Quantidade de Caixas\*", ao lado do peso) e a coluna "Atribuição"
+        (campo "Quantidade de Caixas (fechada)", visível e obrigatório só na
+        ação "Finalizar Organização"). Também pode ser corrigido
+        manualmente em "Editar Pedido", na seção "Organização (correção
+        manual)".
+    - **Peso cubado não é multiplicado pela Quantidade de Caixas:** decisão
+      explícita do solicitante — o cálculo do peso cubado (item 31) continua
+      sendo o de **uma única caixa/volume** representativa (a maior do
+      pedido), sem multiplicar pela quantidade de caixas fechadas. O Peso da
+      Carga (kg) continua sendo o peso total informado diretamente na
+      balança.
+    - **Painel de Tempos:** a lista "Tempo Médio por Operador" continua
+      exibindo o total de caixas (`N cx`) nas duas listas (Separação e
+      Organização) — só a origem do dado mudou: antes vinha da quantidade
+      lançada no cadastro, agora vem da quantidade fechada informada ao
+      finalizar a Organização. Consequência prática: o total de caixas só
+      aparece depois que a Organização daquele pedido for finalizada (antes
+      disso, o pedido entra nas somas com 0 caixas, tanto na lista de
+      Separação quanto na de Organização) — diferente de antes, quando a
+      quantidade já vinha disponível desde o cadastro.
+    - **Extração em Excel:** a aba "Pedidos" ganhou a coluna "Quantidade de
+      Itens" (próxima a SLA/Vencimento, onde ficava a coluna antiga) e
+      renomeou a coluna de caixas para "Quantidade de Caixas (fechada)"
+      (reposicionada perto de Peso da Carga/Altura/Largura/Comprimento/Peso
+      Cubado, já que agora é um dado da Organização); a aba "Resumo" ganhou
+      o indicador "Total de itens cadastrados (lançamento do pedido)" e
+      renomeou o indicador antigo para "Total de caixas fechadas
+      (volumetria - Organização)".
+    - **Compatibilidade com pedidos antigos:** ver nota detalhada na seção 2
+      (abaixo da tabela de campos). Em resumo: a exibição de "Quantidade de
+      Itens" em "Editar Pedido" aproveita automaticamente o valor antigo
+      gravado em `quantidadeCaixas` quando `quantidadeItens` não existir,
+      só para não aparecer em branco — sem necessidade de migração de dados.
+      Essa reaproveitamento não se aplica ao campo de correção de
+      "Quantidade de Caixas (fechada)" pelo motivo explicado naquela nota.
+
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
 futuras.
@@ -751,6 +826,45 @@ firebase deploy
     cenários de finalização — sem isso, eles passariam a ficar bloqueados
     pela nova validação. Reexecutados e confirmados passando normalmente
     após o ajuste.
+- **Separação entre Quantidade de Itens e Quantidade de Caixas fechada
+  (item 32):** testes automatizados (Playwright, com o Firestore simulado),
+  28 verificações, cobrindo: rótulo "Quant. Itens" no cadastro inline e
+  ausência do id antigo `#inlineQuantidadeCaixas`; rótulo "Quantidade de
+  Itens\*" em "Editar Pedido" mostrando o valor cadastrado e ausência do id
+  antigo `#campoQuantidadeCaixas`; no modal "⏱️ Registro de Separação e
+  Organização", bloqueio de "Finalizar Organização" citando especificamente
+  "quantidade de caixas" quando só o peso foi preenchido (distinto do
+  bloqueio por peso); prévia do peso cubado confirmando que **não** é
+  multiplicada pela quantidade de caixas fechada (18 kg para 1 caixa de
+  0,5×0,4×0,3 m, mesmo informando 12 caixas fechadas); gravação correta de
+  `quantidadeCaixas` (fechada = 12) distinta de `quantidadeItens` (cadastro
+  = 10) no mesmo pedido; Painel de Tempos exibindo "12 cx" (a quantidade
+  fechada) e não "10" (a de itens) nas listas de Separação **e**
+  Organização; mesmo fluxo e mesmo bloqueio repetidos com sucesso pela
+  coluna "Atribuição"; correção manual da Quantidade de Caixas em "Editar
+  Pedido" (de 7 para 8) refletindo corretamente no Painel de Tempos (soma
+  recalculada de 12+7 para 12+8 = 20 cx); pedido "legado" simulado (só com
+  o campo antigo `quantidadeCaixas` = 99, sem nunca ter passado pelo item
+  32) mostrando 99 em "Quantidade de Itens" via aproveitamento automático;
+  e extração em Excel com a nova coluna "Quantidade de Itens", a coluna
+  renomeada "Quantidade de Caixas (fechada)" e o novo indicador "Total de
+  itens cadastrados (lançamento do pedido)" na aba "Resumo". Zero erros
+  JavaScript não tratados em todos os cenários.
+  - **Decisões confirmadas com o solicitante antes da implementação:** (1)
+    o peso cubado não deveria ser multiplicado pela quantidade de caixas
+    fechada ("não, manter como está hoje"); (2) tanto a lista de Separação
+    quanto a de Organização do Painel de Tempos deveriam refletir a nova
+    contagem fechada, informada só ao finalizar a Organização.
+  - **Decisão técnica (não é uma pergunta de negócio, mas registrada por
+    transparência):** o campo novo reaproveita o nome `quantidadeCaixas` já
+    existente no Firestore (em vez de usar um nome totalmente novo), porque
+    nenhum pedido em produção chegou a ter esse campo preenchido até agora
+    (confirmado pelo Painel de Tempos, que mostrava "0 cx" para todos os
+    colaboradores) — ou seja, não há dado real cujo significado seria
+    reinterpretado. Isso evitou qualquer necessidade de migração de dados e
+    manteve "de graça" a troca de origem do "N cx" no Painel de Tempos (que
+    já lia esse mesmo nome de campo, sem precisar de nenhuma alteração de
+    lógica).
 - **A integração real com o Firebase em produção não foi testada nesta
   sessão** (o ambiente de desenvolvimento não tem acesso à internet para
   isso) — os testes acima usam um Firestore simulado. Após publicar estes
