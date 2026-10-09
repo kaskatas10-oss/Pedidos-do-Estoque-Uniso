@@ -59,6 +59,7 @@ Cada documento representa um pedido:
 | `dataRecebimentoEstoque`       | string `yyyy-mm-dd`| Data de recebimento no estoque                            |
 | `slaDias`                      | number             | Prazo de SLA em **dias úteis**                            |
 | `dataVencimento`               | string `yyyy-mm-dd`| Calculada automaticamente (recebimento + SLA em dias úteis) |
+| `quantidadeCaixas`             | number             | Volumetria do pedido — quantidade de caixas informada no cadastro (obrigatório). Pedidos criados antes desta atualização podem não ter este campo (ver nota abaixo) |
 | `observacao`                   | string             | Texto livre                                              |
 | `status`                       | `"aberto"` \| `"finalizado"` | Único estado controlado (sem "em análise"/"cancelado") |
 | `criadoEm`                     | Timestamp (servidor)| Data/hora de criação                                     |
@@ -75,6 +76,7 @@ Cada documento representa um pedido:
 | `dataHoraInicioOrganizacao`    | Timestamp (servidor) ou `null` | Data/hora de início da organização               |
 | `operadorFimOrganizacao`       | string \| `null`   | Nome digitado pelo operador ao finalizar a organização        |
 | `dataHoraFimOrganizacao`       | Timestamp (servidor) ou `null` | Data/hora de fim da organização                   |
+| `pesoCargaKg`                  | number \| `null`   | Peso aferido na balança (kg), informado apenas no momento de **finalizar a Organização** (2ª etapa). `null` até lá — não é obrigatório cubar, apenas pesar |
 
 > Nenhum valor de "dias restantes"/"dias de atraso" é armazenado — tudo é
 > calculado dinamicamente a cada renderização, comparando com a data atual.
@@ -86,6 +88,14 @@ Cada documento representa um pedido:
 > nem de organização gravados no Firestore. O app trata essa ausência como
 > `"a-separar"` / `"a-organizar"` automaticamente (nenhuma migração de
 > dados é necessária).
+
+> Pedidos criados antes do item 30 (seção 3) também não têm `quantidadeCaixas`
+> nem `pesoCargaKg` gravados. O campo de caixas aparece em branco ao editar
+> esses pedidos antigos e passa a ser obrigatório salvar com ele preenchido
+> a partir da primeira edição; o peso simplesmente fica fora das somas do
+> Painel de Tempos e das colunas de volumetria/peso do Excel até que o
+> pedido seja finalizado (ou reaberto e finalizado de novo) com o peso
+> informado. Nenhuma migração de dados é necessária.
 
 ## 2b. Modelo de dados (coleção `colaboradores`)
 
@@ -405,6 +415,56 @@ podem ser ajustadas depois, se necessário:
       problema em vez de travar a página, e o restante do app continua
       funcionando normalmente.
 
+30. **Quantidade de Caixas (volumetria) e Peso da Carga aferido na
+    finalização da Organização** (adicionado nesta atualização):
+    - **Quantidade de Caixas:** novo campo obrigatório `Qtde. de Caixas` /
+      `Quantidade de Caixas*`, posicionado antes do campo "Observação" tanto
+      em "Adicionar Novo Pedido" (Painel Operacional) quanto em "Editar
+      Pedido" (Painel Consolidado). Registra a volumetria de cada pedido em
+      número de caixas, para medir o volume efetivamente separado/organizado
+      por pedido. É validado como os demais campos obrigatórios (bloqueia o
+      salvamento com mensagem de erro se estiver vazio ou menor/igual a
+      zero).
+    - **Peso da Carga (kg):** novo campo, pedido apenas no momento de
+      **finalizar a 2ª etapa (Organização)** — nunca na Separação, e nunca
+      ao apenas *iniciar* a Organização. Está disponível nos dois caminhos
+      que finalizam a Organização, que compartilham a mesma lógica interna:
+      - No modal "⏱️ Registro de Separação e Organização", na seção "2.
+        Organização", o campo "Peso aferido da carga (kg)*" se torna
+        obrigatório somente ao clicar em "Finalizar Organização" (iniciar a
+        organização continua sem exigir peso).
+      - Na coluna "Atribuição" do Painel Consolidado (item 28), o campo de
+        peso aparece dinamicamente — oculto nas demais ações (Atribuir/
+        Iniciar Separação, Atribuir/Iniciar Organização) e visível e
+        obrigatório apenas na ação "Finalizar Organização".
+      - Por ora não é necessário cubar a carga (calcular volume em m³) —
+        apenas pesar na balança e informar o valor em quilogramas, conforme
+        solicitado.
+      - O valor é gravado no Firestore (`pesoCargaKg`) para fins de
+        indicadores, e também pode ser corrigido manualmente em "Editar
+        Pedido", na seção "Organização (correção manual)".
+    - **Painel de Tempos:** a lista "Tempo Médio por Operador" agora exibe,
+      abaixo do tempo médio de cada colaborador, o total de caixas
+      (`N cx`) somado a partir de todos os pedidos atribuídos àquele
+      colaborador — nas duas listas (Separação e Organização) — e, apenas
+      na lista de Organização, o peso total aferido (`X,X kg`), somando
+      somente os pedidos que já têm peso registrado.
+    - **Extração em Excel (item 29):** a aba "Pedidos" ganhou as colunas
+      "Quantidade de Caixas" e "Peso da Carga (kg)"; a aba "Resumo" ganhou
+      os indicadores "Total de caixas (volumetria)" e "Peso total aferido
+      (kg)", e a linha de tempo médio por operador de cada etapa passou a
+      mostrar também o total de caixas (e, na Organização, o peso total) ao
+      lado do tempo médio.
+    - **Premissa adotada:** como o pedido descreveu dois pontos de entrada
+      para finalizar a Organização (o modal ⏱️ e a coluna "Atribuição"), o
+      campo de peso foi habilitado nos **dois** caminhos — ambos chamam a
+      mesma função de finalização, e a integridade dos indicadores depende
+      de cobrir os dois. Se apenas um dos caminhos for de fato usado na
+      operação do dia a dia, o outro simplesmente nunca aparecerá como
+      pendência.
+    - Pedidos antigos sem `quantidadeCaixas`/`pesoCargaKg` são tratados sem
+      quebrar nada — ver nota na seção 2.
+
 Todas essas premissas estão comentadas diretamente no código-fonte
 (`app.js`), próximo à lógica correspondente, para facilitar consultas
 futuras.
@@ -569,6 +629,44 @@ firebase deploy
     Recomenda-se, após publicar os arquivos, clicar uma vez em "Extrair
     Dados (Excel)" no navegador real para confirmar que o download ocorre
     normalmente.
+- **Quantidade de Caixas e Peso da Carga (item 30):** testes automatizados
+  (Playwright, com o Firestore simulado) cobrindo: bloqueio ao tentar
+  adicionar um novo pedido sem informar a Quantidade de Caixas e criação
+  correta do pedido (com o valor persistido) após preenchê-la; pedido
+  "legado" sem `quantidadeCaixas` abrindo em "Editar Pedido" com o campo em
+  branco, bloqueio ao tentar salvar sem preenchê-lo e salvamento correto
+  após preenchido; no modal "⏱️ Registro de Separação e Organização",
+  bloqueio de "Finalizar Organização" sem informar o peso (com a mensagem
+  de erro esperada) e gravação correta do peso, do status "organizado" e da
+  finalização automática do pedido após informá-lo; na coluna "Atribuição",
+  confirmação de que o campo de peso permanece oculto na ação "Atribuir
+  Separação" e aparece apenas na ação "Finalizar Organização" (incluindo o
+  bloqueio ao confirmar sem peso e a gravação correta ao informá-lo, com o
+  aviso de confirmação exibindo o texto esperado); Painel de Tempos exibindo
+  a soma correta de caixas por colaborador nas duas listas (Separação e
+  Organização) e a soma correta de peso na lista de Organização; extração em
+  Excel contendo as novas colunas "Quantidade de Caixas" e "Peso da Carga
+  (kg)" na aba "Pedidos" com os valores corretos, e os novos indicadores
+  "Total de caixas (volumetria)" e "Peso total aferido (kg)" na aba
+  "Resumo"; e regressão confirmando que o bloqueio de número de pedido
+  duplicado continua funcionando. Zero erros JavaScript não tratados em
+  todos os cenários.
+  - Durante a escrita dos testes foi identificado e corrigido um bug na
+    navegação entre telas usada pelo próprio roteiro de teste (não um bug
+    do app): os botões "📊 Painel Consolidado" e "⏳ Painel de Tempos"
+    alternam entre a tela correspondente e o Painel Operacional — clicar
+    de novo no botão da tela já ativa volta para o Painel Operacional em
+    vez de manter a tela aberta. O roteiro de teste foi ajustado para não
+    clicar duas vezes no mesmo botão de navegação quando a tela já estava
+    aberta.
+  - Proativamente, foi aplicada a mesma correção de CSS já usada para
+    `.aviso-atribuicao[hidden]` (item 28) ao novo campo de peso dentro do
+    modal de Atribuição: como `.atribuicao-corpo label` já define
+    `display: flex`, foi adicionada a regra
+    `.atribuicao-corpo label[hidden] { display: none; }` para garantir que
+    o atributo `hidden` continue escondendo visualmente o campo — e os
+    testes automatizados confirmaram que o campo de peso realmente fica
+    oculto/visível conforme esperado.
 - **A integração real com o Firebase em produção não foi testada nesta
   sessão** (o ambiente de desenvolvimento não tem acesso à internet para
   isso) — os testes acima usam um Firestore simulado. Após publicar estes
