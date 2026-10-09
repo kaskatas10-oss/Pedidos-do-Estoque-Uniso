@@ -817,6 +817,15 @@ tbody tr:last-child td { border-bottom: none; }
   color: var(--cor-texto-secundario);
   font-weight: 600;
 }
+/* Mesma armadilha de especificidade já neutralizada em .modal-overlay[hidden]
+   e .aviso-atribuicao[hidden]: a regra acima define "display" com a mesma
+   especificidade da regra nativa [hidden] do navegador, então o atributo
+   "hidden" sozinho não escondia visualmente o campo de peso (ver item 30 do
+   README). Usado para mostrar/ocultar #campoAtribuicaoPesoWrapper conforme
+   a fase/ação (só aparece em "Finalizar Organização"). */
+.atribuicao-corpo label[hidden] {
+  display: none;
+}
 .atribuicao-corpo input,
 .atribuicao-corpo select {
   padding: 9px 10px;
@@ -969,14 +978,29 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .lista-tempos-operador li {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  gap: 4px;
   font-size: 0.85rem;
   padding-bottom: 8px;
   border-bottom: 1px dashed var(--cor-borda);
 }
 .lista-tempos-operador li:last-child { border-bottom: none; padding-bottom: 0; }
+.tempo-operador-linha-principal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+/* Segunda linha: totais de caixas (volumetria) e, na Organização, peso
+   aferido - somados por colaborador (ver item 30 do README). */
+.tempo-operador-linha-extra {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  font-size: 0.76rem;
+  color: var(--cor-texto-secundario);
+  font-variant-numeric: tabular-nums;
+}
 .tempo-operador-nome { font-weight: 600; }
 .tempo-operador-metricas {
   display: flex;
