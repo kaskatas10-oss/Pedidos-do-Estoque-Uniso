@@ -541,9 +541,38 @@ async function salvarPedido(dadosFormulario, idExistente) {
       // finalizar a Organização (ver finalizarOrganizacaoPedido). Fica nulo
       // até lá; pedidos criados antes desta atualização também ficam nulos
       // e são tratados como "não informado" em todos os cálculos/telas.
-      pesoCargaKg: null
+      pesoCargaKg: null,
+      // Cubagem (cm) da maior caixa/volume do pedido e o peso cubado (kg)
+      // calculado a partir dela, informados junto com o peso ao finalizar a
+      // Organização (ver calcularPesoCubado e item 31 do README). Ficam
+      // nulos até lá.
+      alturaCm: null,
+      larguraCm: null,
+      comprimentoCm: null,
+      pesoCubadoKg: null
     });
   }
+}
+
+// Peso cubado (kg) a partir das dimensões (cm) da maior caixa/volume do
+// pedido - NÃO multiplica pela quantidade de caixas (ver item 31 do
+// README): mede-se apenas 1 volume, o maior, como referência de cubagem.
+// Fator usado: 300 kg/m³, padrão de transporte rodoviário de cargas no
+// Brasil (NTC&Logística/ANTT). Fórmula: peso cubado = Altura × Largura ×
+// Comprimento (em metros) × 300. Retorna null se alguma dimensão estiver
+// ausente ou inválida.
+const FATOR_CUBAGEM_KG_M3 = 300;
+
+function calcularPesoCubado(alturaCm, larguraCm, comprimentoCm) {
+  const altura = Number(alturaCm);
+  const largura = Number(larguraCm);
+  const comprimento = Number(comprimentoCm);
+  if (!altura || !largura || !comprimento || altura <= 0 || largura <= 0 || comprimento <= 0) {
+    return null;
+  }
+  const volumeM3 = (altura / 100) * (largura / 100) * (comprimento / 100);
+  const pesoCubado = volumeM3 * FATOR_CUBAGEM_KG_M3;
+  return Math.round(pesoCubado * 100) / 100;
 }
 
 // Localiza um pedido pelo número (comparação sem diferenciar maiúsculas ou
@@ -722,12 +751,19 @@ async function iniciarOrganizacaoPedido(pedido, nomeOperador) {
 // informado neste exato momento (tanto pelo modal ⏱️ quanto pelo atalho da
 // coluna "Atribuição" - ambos chamam esta mesma função, ver item 30 do
 // README). Obrigatório nos dois caminhos; validado antes de chegar aqui.
-async function finalizarOrganizacaoPedido(pedido, nomeOperador, pesoCargaKg) {
+// alturaCm/larguraCm/comprimentoCm: dimensões (cm) da maior caixa/volume do
+// pedido, também informadas neste momento nos dois caminhos (item 31 do
+// README); pesoCubadoKg é calculado automaticamente a partir delas.
+async function finalizarOrganizacaoPedido(pedido, nomeOperador, pesoCargaKg, alturaCm, larguraCm, comprimentoCm) {
   await updateDoc(doc(db, NOME_COLECAO, pedido.id), {
     statusOrganizacao: 'organizado',
     operadorFimOrganizacao: nomeOperador,
     dataHoraFimOrganizacao: serverTimestamp(),
-    pesoCargaKg: Number(pesoCargaKg)
+    pesoCargaKg: Number(pesoCargaKg),
+    alturaCm: Number(alturaCm),
+    larguraCm: Number(larguraCm),
+    comprimentoCm: Number(comprimentoCm),
+    pesoCubadoKg: calcularPesoCubado(alturaCm, larguraCm, comprimentoCm)
   });
 
   if (pedido.statusSeparacao === 'separado' && pedido.status !== 'finalizado') {
@@ -1599,9 +1635,11 @@ function duracaoTotalMs(pedido) {
  * Também soma, para os mesmos pedidos (etapa concluída por aquele
  * operador): o total de caixas (quantidadeCaixas, volumetria informada no
  * cadastro do pedido) e - quando `somarPeso` é true (usado só para a
- * Organização, onde o peso é de fato registrado) - o peso total aferido
- * (pesoCargaKg). Pedidos sem quantidadeCaixas/pesoCargaKg (cadastrados
- * antes desta atualização) são ignorados nessas somas, sem gerar erro.
+ * Organização, onde o peso e a cubagem são de fato registrados) - o peso
+ * total aferido (pesoCargaKg) e o peso cubado total (pesoCubadoKg, somando
+ * o peso cubado de cada pedido - item 31 do README). Pedidos sem
+ * quantidadeCaixas/pesoCargaKg/pesoCubadoKg (cadastrados antes desta
+ * atualização) são ignorados nessas somas, sem gerar erro.
  */
 function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao, somarPeso = false) {
   const registros = lista
@@ -1609,15 +1647,16 @@ function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao, somar
       operador: pedido[campoOperadorFim],
       duracao: funcaoDuracao(pedido),
       caixas: pedido.quantidadeCaixas,
-      peso: pedido.pesoCargaKg
+      peso: pedido.pesoCargaKg,
+      pesoCubado: pedido.pesoCubadoKg
     }))
     .filter((registro) => registro.operador && registro.duracao != null);
 
   const totalRegistros = registros.length;
   const porOperador = new Map();
-  registros.forEach(({ operador, duracao, caixas, peso }) => {
+  registros.forEach(({ operador, duracao, caixas, peso, pesoCubado }) => {
     if (!porOperador.has(operador)) {
-      porOperador.set(operador, { somaMs: 0, contagem: 0, somaCaixas: 0, somaPeso: 0, temPeso: false });
+      porOperador.set(operador, { somaMs: 0, contagem: 0, somaCaixas: 0, somaPeso: 0, temPeso: false, somaPesoCubado: 0, temPesoCubado: false });
     }
     const acumulado = porOperador.get(operador);
     acumulado.somaMs += duracao;
@@ -1627,16 +1666,21 @@ function calcularTemposPorOperador(lista, campoOperadorFim, funcaoDuracao, somar
       acumulado.somaPeso += peso;
       acumulado.temPeso = true;
     }
+    if (somarPeso && typeof pesoCubado === 'number' && !Number.isNaN(pesoCubado)) {
+      acumulado.somaPesoCubado += pesoCubado;
+      acumulado.temPesoCubado = true;
+    }
   });
 
   return Array.from(porOperador.entries())
-    .map(([operador, { somaMs, contagem, somaCaixas, somaPeso, temPeso }]) => ({
+    .map(([operador, { somaMs, contagem, somaCaixas, somaPeso, temPeso, somaPesoCubado, temPesoCubado }]) => ({
       operador,
       tempoMedioMs: somaMs / contagem,
       quantidade: contagem,
       percentual: totalRegistros > 0 ? Math.round((contagem / totalRegistros) * 100) : 0,
       totalCaixas: somaCaixas,
-      totalPesoKg: temPeso ? somaPeso : null
+      totalPesoKg: temPeso ? somaPeso : null,
+      totalPesoCubadoKg: temPesoCubado ? somaPesoCubado : null
     }))
     .sort((a, b) => b.quantidade - a.quantidade);
 }
@@ -1672,6 +1716,7 @@ function renderizarListaTemposOperador(idLista, idMensagemVazia, dados) {
       <div class="tempo-operador-linha-extra">
         <span>${item.totalCaixas} cx</span>
         ${item.totalPesoKg != null ? `<span>${formatarPesoKg(item.totalPesoKg)}</span>` : ''}
+        ${item.totalPesoCubadoKg != null ? `<span>${formatarPesoKg(item.totalPesoCubadoKg)} cubado</span>` : ''}
       </div>
     `;
     lista.appendChild(li);
@@ -1798,6 +1843,10 @@ function abrirModalEdicaoPedido(pedido) {
   popularSelectOperador('campoEditarOperadorFimOrganizacao', '(nenhum)', pedido.operadorFimOrganizacao || '');
   document.getElementById('campoEditarDataHoraFimOrganizacao').value = timestampParaDatetimeLocalBrasilia(pedido.dataHoraFimOrganizacao);
   document.getElementById('campoEditarPesoCargaKg').value = pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '';
+  document.getElementById('campoEditarAlturaCm').value = pedido.alturaCm != null ? pedido.alturaCm : '';
+  document.getElementById('campoEditarLarguraCm').value = pedido.larguraCm != null ? pedido.larguraCm : '';
+  document.getElementById('campoEditarComprimentoCm').value = pedido.comprimentoCm != null ? pedido.comprimentoCm : '';
+  document.getElementById('previewPesoCubadoEditar').textContent = pedido.pesoCubadoKg != null ? formatarPesoKg(pedido.pesoCubadoKg) : '—';
 
   atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento');
   document.getElementById('modalPedido').hidden = false;
@@ -1866,6 +1915,18 @@ function configurarModais() {
   document.getElementById('campoSlaDias').addEventListener('input', () =>
     atualizarPreviewVencimento('campoDataRecebimento', 'campoSlaDias', 'previewVencimento')
   );
+
+  // Prévia ao vivo do peso cubado na correção manual de Organização
+  // (Editar Pedido), conforme altura/largura/comprimento são digitados.
+  ['campoEditarAlturaCm', 'campoEditarLarguraCm', 'campoEditarComprimentoCm'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', () => {
+      const altura = document.getElementById('campoEditarAlturaCm').value;
+      const largura = document.getElementById('campoEditarLarguraCm').value;
+      const comprimento = document.getElementById('campoEditarComprimentoCm').value;
+      const pesoCubado = calcularPesoCubado(altura, largura, comprimento);
+      document.getElementById('previewPesoCubadoEditar').textContent = pesoCubado != null ? formatarPesoKg(pesoCubado) : '—';
+    });
+  });
 
   // Formulário do modal: usado exclusivamente para EDITAR um pedido existente.
   document.getElementById('formPedido').addEventListener('submit', async (evento) => {
@@ -1957,17 +2018,27 @@ function configurarModais() {
       dataHoraFimSeparacao: fimSep.data,
       statusSeparacao: derivarStatusSeparacao(inicioSep.data, fimSep.data)
     };
-    // Peso da carga (kg): correção manual opcional, independente das
+    // Peso da carga (kg) e cubagem (altura/largura/comprimento, cm, da
+    // maior caixa/volume): correção manual opcional, independente das
     // marcações acima. Deixar em branco remove o valor (volta a "não
-    // informado"), igual ao padrão já usado para as demais correções.
+    // informado"), igual ao padrão já usado para as demais correções. O
+    // peso cubado só é recalculado quando as 3 dimensões estão preenchidas;
+    // se faltar alguma, fica null (mesmo padrão do peso).
     const valorPesoCorrecao = document.getElementById('campoEditarPesoCargaKg').value;
+    const valorAlturaCorrecao = document.getElementById('campoEditarAlturaCm').value;
+    const valorLarguraCorrecao = document.getElementById('campoEditarLarguraCm').value;
+    const valorComprimentoCorrecao = document.getElementById('campoEditarComprimentoCm').value;
     dados.registroOrganizacao = {
       operadorInicioOrganizacao: inicioOrg.nome,
       dataHoraInicioOrganizacao: inicioOrg.data,
       operadorFimOrganizacao: fimOrg.nome,
       dataHoraFimOrganizacao: fimOrg.data,
       statusOrganizacao: derivarStatusOrganizacao(inicioOrg.data, fimOrg.data),
-      pesoCargaKg: valorPesoCorrecao === '' ? null : Number(valorPesoCorrecao)
+      pesoCargaKg: valorPesoCorrecao === '' ? null : Number(valorPesoCorrecao),
+      alturaCm: valorAlturaCorrecao === '' ? null : Number(valorAlturaCorrecao),
+      larguraCm: valorLarguraCorrecao === '' ? null : Number(valorLarguraCorrecao),
+      comprimentoCm: valorComprimentoCorrecao === '' ? null : Number(valorComprimentoCorrecao),
+      pesoCubadoKg: calcularPesoCubado(valorAlturaCorrecao, valorLarguraCorrecao, valorComprimentoCorrecao)
     };
 
     // Reflete a correção na finalização automática do pedido: se as duas
@@ -2273,29 +2344,57 @@ function configurarModalSeparacao() {
       return;
     }
 
-    // Peso aferido da carga (kg): obrigatório só para finalizar (não para
-    // iniciar a organização) - ver item 30 do README.
+    // Peso aferido da carga (kg) e cubagem (altura/largura/comprimento, cm,
+    // da maior caixa/volume): obrigatórios só para finalizar (não para
+    // iniciar a organização) - ver itens 30 e 31 do README.
     const campoPesoOrg = document.getElementById('campoOrganizacaoPesoKg');
+    const campoAlturaOrg = document.getElementById('campoOrganizacaoAlturaCm');
+    const campoLarguraOrg = document.getElementById('campoOrganizacaoLarguraCm');
+    const campoComprimentoOrg = document.getElementById('campoOrganizacaoComprimentoCm');
     const pesoOrg = campoPesoOrg.value;
     if (!pesoOrg || Number(pesoOrg) <= 0) {
       erroOrg.textContent = 'Informe o peso aferido da carga (kg) na balança antes de finalizar a organização.';
       erroOrg.hidden = false;
       return;
     }
+    if (!campoAlturaOrg.value || !campoLarguraOrg.value || !campoComprimentoOrg.value
+      || Number(campoAlturaOrg.value) <= 0 || Number(campoLarguraOrg.value) <= 0 || Number(campoComprimentoOrg.value) <= 0) {
+      erroOrg.textContent = 'Informe a altura, largura e comprimento (cm) da maior caixa/volume antes de finalizar a organização.';
+      erroOrg.hidden = false;
+      return;
+    }
 
     try {
-      await finalizarOrganizacaoPedido(pedido, nome, pesoOrg);
+      await finalizarOrganizacaoPedido(pedido, nome, pesoOrg, campoAlturaOrg.value, campoLarguraOrg.value, campoComprimentoOrg.value);
       sucessoOrg.textContent = pedido.statusSeparacao === 'separado'
         ? `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}. Pedido concluído automaticamente.`
         : `Organização do pedido ${pedido.numeroPedido} finalizada por ${nome}.`;
       sucessoOrg.hidden = false;
       campoNumeroOrg.value = '';
       campoPesoOrg.value = '';
+      campoAlturaOrg.value = '';
+      campoLarguraOrg.value = '';
+      campoComprimentoOrg.value = '';
+      document.getElementById('previewPesoCubadoOrganizacao').textContent = '—';
       campoNumeroOrg.focus();
     } catch (erroSalvar) {
       erroOrg.textContent = 'Erro ao registrar finalização da organização: ' + erroSalvar.message;
       erroOrg.hidden = false;
     }
+  });
+
+  // Prévia ao vivo do peso cubado conforme altura/largura/comprimento são
+  // digitados (puramente informativo; a validação de obrigatoriedade
+  // acontece só ao clicar em "Finalizar Organização", acima).
+  const previewCubadoOrg = document.getElementById('previewPesoCubadoOrganizacao');
+  ['campoOrganizacaoAlturaCm', 'campoOrganizacaoLarguraCm', 'campoOrganizacaoComprimentoCm'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', () => {
+      const altura = document.getElementById('campoOrganizacaoAlturaCm').value;
+      const largura = document.getElementById('campoOrganizacaoLarguraCm').value;
+      const comprimento = document.getElementById('campoOrganizacaoComprimentoCm').value;
+      const pesoCubado = calcularPesoCubado(altura, largura, comprimento);
+      previewCubadoOrg.textContent = pesoCubado != null ? formatarPesoKg(pesoCubado) : '—';
+    });
   });
 }
 
@@ -2342,6 +2441,13 @@ function configurarModalAtribuicaoFase() {
   const selectColaborador = document.getElementById('campoAtribuicaoColaborador');
   const pesoWrapper = document.getElementById('campoAtribuicaoPesoWrapper');
   const campoPeso = document.getElementById('campoAtribuicaoPesoKg');
+  const alturaWrapper = document.getElementById('campoAtribuicaoAlturaWrapper');
+  const campoAltura = document.getElementById('campoAtribuicaoAlturaCm');
+  const larguraWrapper = document.getElementById('campoAtribuicaoLarguraWrapper');
+  const campoLargura = document.getElementById('campoAtribuicaoLarguraCm');
+  const comprimentoWrapper = document.getElementById('campoAtribuicaoComprimentoWrapper');
+  const campoComprimento = document.getElementById('campoAtribuicaoComprimentoCm');
+  const previewCubado = document.getElementById('previewPesoCubadoAtribuicao');
   const nota = document.getElementById('notaAtribuicaoFase');
   const erro = document.getElementById('erroModalAtribuicaoFase');
   const btnConfirmar = document.getElementById('btnConfirmarAtribuicaoFase');
@@ -2403,11 +2509,20 @@ function configurarModalAtribuicaoFase() {
     badgeFase.textContent = ehSeparacao ? '📦 Fase 1 de 2 — Separação' : '🔨 Fase 2 de 2 — Organização (na mesa)';
     badgeFase.className = 'badge-fase ' + (ehSeparacao ? 'badge-fase-separacao' : 'badge-fase-organizacao');
 
-    // Peso aferido da carga: só aparece ao finalizar a Organização (mesmo
-    // campo e mesma obrigatoriedade do modal ⏱️ - ver item 30 do README).
+    // Peso aferido da carga e cubagem (altura/largura/comprimento): só
+    // aparecem ao finalizar a Organização (mesmos campos e mesma
+    // obrigatoriedade do modal ⏱️ - ver itens 30 e 31 do README).
     const pedeOPeso = fase === 'organizacao' && acao === 'finalizar';
     pesoWrapper.hidden = !pedeOPeso;
     campoPeso.value = '';
+    alturaWrapper.hidden = !pedeOPeso;
+    larguraWrapper.hidden = !pedeOPeso;
+    comprimentoWrapper.hidden = !pedeOPeso;
+    campoAltura.value = '';
+    campoLargura.value = '';
+    campoComprimento.value = '';
+    previewCubado.hidden = !pedeOPeso;
+    previewCubado.querySelector('strong').textContent = '—';
 
     if (acao === 'atribuir') {
       titulo.textContent = ehSeparacao ? 'Atribuir Separação' : 'Atribuir Organização';
@@ -2428,6 +2543,15 @@ function configurarModalAtribuicaoFase() {
 
     modal.hidden = false;
   };
+
+  // Prévia ao vivo do peso cubado conforme altura/largura/comprimento são
+  // digitados (mesmo padrão do modal ⏱️, puramente informativo).
+  [campoAltura, campoLargura, campoComprimento].forEach((campo) => {
+    campo.addEventListener('input', () => {
+      const pesoCubado = calcularPesoCubado(campoAltura.value, campoLargura.value, campoComprimento.value);
+      previewCubado.querySelector('strong').textContent = pesoCubado != null ? formatarPesoKg(pesoCubado) : '—';
+    });
+  });
 
   btnConfirmar.addEventListener('click', async () => {
     if (!numeroPedidoAtribuicaoAtual) return;
@@ -2461,6 +2585,12 @@ function configurarModalAtribuicaoFase() {
       erro.hidden = false;
       return;
     }
+    if (finalizandoOrganizacao && (!campoAltura.value || !campoLargura.value || !campoComprimento.value
+      || Number(campoAltura.value) <= 0 || Number(campoLargura.value) <= 0 || Number(campoComprimento.value) <= 0)) {
+      erro.textContent = 'Informe a altura, largura e comprimento (cm) da maior caixa/volume antes de finalizar a organização.';
+      erro.hidden = false;
+      return;
+    }
 
     try {
       if (faseAtribuicaoAtual === 'separacao' && acaoAtribuicaoAtual === 'atribuir') {
@@ -2473,7 +2603,7 @@ function configurarModalAtribuicaoFase() {
         await iniciarOrganizacaoPedido(pedidoAtual, nome);
         exibirAvisoAtribuicao('Organização atribuída.');
       } else if (finalizandoOrganizacao) {
-        await finalizarOrganizacaoPedido(pedidoAtual, nome, campoPeso.value);
+        await finalizarOrganizacaoPedido(pedidoAtual, nome, campoPeso.value, campoAltura.value, campoLargura.value, campoComprimento.value);
         exibirAvisoAtribuicao('Pedido finalizado e baixado.');
       }
       fecharModal();
@@ -2909,6 +3039,10 @@ function montarLinhasPlanilhaPedidos(lista) {
     'Tempo de Organização': duracaoParaPlanilha(duracaoOrganizacaoMs(pedido)),
     'Tempo Total (Separação + Organização)': duracaoParaPlanilha(duracaoTotalMs(pedido)),
     'Peso da Carga (kg)': pedido.pesoCargaKg != null ? pedido.pesoCargaKg : '',
+    'Altura (cm)': pedido.alturaCm != null ? pedido.alturaCm : '',
+    'Largura (cm)': pedido.larguraCm != null ? pedido.larguraCm : '',
+    'Comprimento (cm)': pedido.comprimentoCm != null ? pedido.comprimentoCm : '',
+    'Peso Cubado (kg)': pedido.pesoCubadoKg != null ? pedido.pesoCubadoKg : '',
     Observação: pedido.observacao || ''
   }));
 }
@@ -2922,12 +3056,14 @@ function montarLinhasPlanilhaResumo(lista) {
   const noPrazo = finalizados.filter((p) => p.resultadoSLA === 'no_prazo').length;
   const atrasados = finalizados.filter((p) => p.resultadoSLA === 'atrasado').length;
 
-  // Volumetria (caixas) e peso: somados só sobre pedidos com o dado
-  // informado (pedidos antigos, sem quantidadeCaixas/pesoCargaKg, são
-  // ignorados nessa soma em vez de contar como zero).
+  // Volumetria (caixas), peso e peso cubado: somados só sobre pedidos com o
+  // dado informado (pedidos antigos, sem quantidadeCaixas/pesoCargaKg/
+  // pesoCubadoKg, são ignorados nessa soma em vez de contar como zero).
   const totalCaixas = lista.reduce((soma, p) => soma + (typeof p.quantidadeCaixas === 'number' ? p.quantidadeCaixas : 0), 0);
   const pedidosComPeso = lista.filter((p) => typeof p.pesoCargaKg === 'number');
   const totalPesoKg = pedidosComPeso.reduce((soma, p) => soma + p.pesoCargaKg, 0);
+  const pedidosComPesoCubado = lista.filter((p) => typeof p.pesoCubadoKg === 'number');
+  const totalPesoCubadoKg = pedidosComPesoCubado.reduce((soma, p) => soma + p.pesoCubadoKg, 0);
 
   const linhas = [
     { Indicador: 'Data de extração', Valor: formatarDataHoraBrasilia(new Date()) },
@@ -2944,6 +3080,10 @@ function montarLinhasPlanilhaResumo(lista) {
       Indicador: 'Peso total aferido (kg)',
       Valor: pedidosComPeso.length > 0 ? formatarPesoKg(totalPesoKg) : '- (nenhum pedido com peso registrado)'
     },
+    {
+      Indicador: 'Peso cubado total (kg)',
+      Valor: pedidosComPesoCubado.length > 0 ? formatarPesoKg(totalPesoCubadoKg) : '- (nenhum pedido com cubagem registrada)'
+    },
     { Indicador: '', Valor: '' },
     { Indicador: 'Tempo médio por operador — Separação', Valor: '' }
   ];
@@ -2959,9 +3099,10 @@ function montarLinhasPlanilhaResumo(lista) {
   linhas.push({ Indicador: 'Tempo médio por operador — Organização', Valor: '' });
   calcularTemposPorOperador(lista, 'operadorFimOrganizacao', duracaoOrganizacaoMs, true).forEach((item) => {
     const sufixoPeso = item.totalPesoKg != null ? `, ${formatarPesoKg(item.totalPesoKg)}` : '';
+    const sufixoPesoCubado = item.totalPesoCubadoKg != null ? `, ${formatarPesoKg(item.totalPesoCubadoKg)} cubado` : '';
     linhas.push({
       Indicador: `   ${item.operador}`,
-      Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%) — ${item.totalCaixas} cx${sufixoPeso}`
+      Valor: `${formatarDuracao(item.tempoMedioMs)} (${item.quantidade} pedidos, ${item.percentual}%) — ${item.totalCaixas} cx${sufixoPeso}${sufixoPesoCubado}`
     });
   });
 
